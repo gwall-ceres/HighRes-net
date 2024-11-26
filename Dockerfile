@@ -1,22 +1,49 @@
-FROM nvidia/cuda:10.0-cudnn7-runtime-ubuntu18.04
+# Use a recent CUDA base image with cuDNN 8 and Ubuntu 20.04
+FROM nvidia/cuda:11.7.1-cudnn8-runtime-ubuntu20.04
 
+# Prevent interactive prompts during package installation
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update &&  apt-get install -y   \
-    python3-pip python3 \
-    htop unzip wget sudo vim
+# Install system dependencies, add Deadsnakes PPA, and install Python 3.7 with distutils
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.7 \
+    python3.7-dev \
+    python3.7-distutils \
+    python3-pip \
+    git \
+    build-essential \
+    libatlas-base-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN ln -s /usr/bin/python3  /usr/bin/python
-RUN pip3 install pip --upgrade
-# jupyter notebook and tensorboard
-EXPOSE 8888 6006
+# Set Python 3.7 as the default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 1
 
-COPY requirements.txt ./
+# Upgrade pip for Python 3.7
+RUN python3 -m pip install --upgrade pip
 
+# Set working directory
+WORKDIR /app
 
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Copy requirements.txt into the image
+COPY requirements.txt /app/requirements.txt
 
+# Install numpy first to satisfy scikit-learn dependency
+RUN python3 -m pip install --no-cache-dir numpy
 
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+# Install the remaining Python dependencies
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-ENV  PATH=/usr/local/nvidia/bin:$PATH
+# Copy the rest of the project files
+COPY . /app
+
+# Clean up to reduce image size
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Set environment variables if needed
+ENV PYTHONUNBUFFERED=1
+
+# Specify the default command (modify as needed)
+CMD ["python3", "train.py"]
