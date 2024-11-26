@@ -46,4 +46,4 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 ENV PYTHONUNBUFFERED=1
 
 # Specify the default command (modify as needed)
-CMD ["python3", "train.py"]
+CMD ["python3", "src/train.py"]

@@ -153,7 +153,7 @@ def trainAndGetBestModel(fusion_model, regis_model, optimizer, dataloaders, base
 
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=config['training']['lr_decay'],
                                                verbose=True, patience=config['training']['lr_step'])
-
+    torch.autograd.set_detect_anomaly(True)
     for epoch in tqdm(range(1, num_epochs + 1)):
 
         # Train

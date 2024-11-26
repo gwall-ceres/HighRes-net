@@ -35,10 +35,10 @@
     
   "training": {
      "num_epochs": 400,
-     "batch_size": 32,
+     "batch_size": 8,
 
-     "min_L": 32,
-     "n_views": 32,
+     "min_L": 2,
+     "n_views": 8,
      "n_workers": 4,
      "crop": 3,
 
