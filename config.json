@@ -1,0 +1,10 @@
+{
+    "reference_image": "/home/geoff/projects/HighRes-net/data/train/RED/imgset0001/hr_downscaled.png",
+    "reference_mask": "/home/geoff/projects/HighRes-net/data/train/RED/imgset0001/sm_downscaled.png",
+    "template_image": "/home/geoff/projects/HighRes-net/data/train/RED/imgset0001/aligned_LR009.png",
+    "template_mask": "/home/geoff/projects/HighRes-net/data/train/RED/imgset0001/aligned_QM009.png",
+    "current_deltax": 0.0,
+    "current_deltay": 0.0,
+    "shift_step_x": 0.1,
+    "shift_step_y": 0.1
+}

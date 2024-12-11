@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import os
 import random
 import json
+import time
 
 
 # In[2]:
@@ -48,8 +49,6 @@ feature_extractor.eval()
 for param in feature_extractor.parameters():
     param.requires_grad = False
 '''
-
-# In[3]:
 
 
 def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False):
@@ -107,7 +106,8 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet means
                              std=[0.229, 0.224, 0.225])   # ImageNet stds
     ])
-    
+    torch.cuda.synchronize()
+    start = time.time()
     # Apply preprocessing to both images
     ref_tensor = preprocess(ref_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
     mov_tensor = preprocess(mov_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
@@ -213,11 +213,65 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     if debug and fig is not None:
         plt.tight_layout()
         plt.show()
-    
+    torch.cuda.synchronize()
+    end = time.time()
+    print(f"***total time to compute the perceptual loss = {end - start}***")
     return total_loss
 
 
 # In[54]:
+
+def min_max_scale(image):
+    min_val = np.min(image)
+    max_val = np.max(image)
+    scaled_image = (image - min_val) / (max_val - min_val + 1e-8)  # Avoid division by zero
+    return scaled_image
+    
+def compute_combined_perceptual_mse_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False, alpha=0.5, beta=0.5):
+    """
+    Compute a combined perceptual and MSE loss between two images given their masks.
+    
+    Parameters:
+        model: Pretrained feature extractor model.
+        ref_image: NumPy array, reference image.
+        mov_image: NumPy array, moving image to align.
+        ref_mask: NumPy boolean array, mask for reference image.
+        mov_mask: NumPy boolean array, mask for moving image.
+        device: Computation device.
+        debug: Boolean, if True, visualize activations and masks.
+        alpha: Weight for perceptual loss.
+        beta: Weight for MSE loss.
+    
+    Returns:
+        combined_loss: Weighted sum of perceptual and MSE losses.
+    """
+    # Compute Perceptual Loss
+    perceptual_loss = compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device, debug)
+    
+    # Normalize images for MSE computation
+    ref_normalized = min_max_scale(ref_image)
+    mov_normalized = min_max_scale(mov_image)
+    
+    # Convert to tensors
+    ref_tensor = torch.from_numpy(ref_normalized).float().to(device)
+    mov_tensor = torch.from_numpy(mov_normalized).float().to(device)
+    
+    # Apply combined mask
+    combined_mask = ref_mask & mov_mask
+    combined_mask_tensor = torch.from_numpy(combined_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+    
+    # Mask the tensors
+    ref_tensor_masked = ref_tensor * combined_mask_tensor
+    mov_tensor_masked = mov_tensor * combined_mask_tensor
+    
+    # Compute MSE Loss
+    mse_loss = F.mse_loss(ref_tensor_masked, mov_tensor_masked, reduction='mean')
+    
+    # Compute Combined Loss
+    combined_loss = alpha * perceptual_loss + beta * mse_loss
+    print(f"combined_loss {alpha * perceptual_loss} + {beta * mse_loss}")
+    
+    return combined_loss
 
 
 def process_image_for_display(image, p2=1, p98=99):
@@ -352,8 +406,8 @@ def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_m
     """
 
     # Compute difference images
-    difference_initial = np.abs(ref_image - initial_moving_image)
-    difference_aligned = np.abs(ref_image - aligned_image)
+    difference_initial = np.abs(min_max_scale(ref_image) - min_max_scale(initial_moving_image))
+    difference_aligned = np.abs(min_max_scale(ref_image) - min_max_scale(aligned_image))
     ratio = np.sum(difference_aligned) / np.sum(difference_initial)
     difference_initial = transform.rescale(difference_initial, (3, 3), order=4, mode='reflect', anti_aliasing=True)
     difference_aligned = transform.rescale(difference_aligned, (3, 3), order=4, mode='reflect', anti_aliasing=True)
@@ -494,9 +548,9 @@ def iterative_align_refinement_with_perceptual_loss(
             order=0
         )
         #shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
-        
+
         # Compute perceptual loss between reference and shifted moving image
-        loss = compute_perceptual_loss(
+        loss = compute_combined_perceptual_mse_loss(
             model=model,
             ref_image=ref_image,
             mov_image=shifted_image,
@@ -510,8 +564,15 @@ def iterative_align_refinement_with_perceptual_loss(
         print(f"Iteration {iteration + 1}: Perceptual Loss = {loss:.6f}")
 
         # Compute shift between reference and currently aligned moving image
+        
         ref_masked = ref_image * (ref_mask.astype(ref_image.dtype) * 0.5 + 0.5)
         mov_masked = shifted_image * (shifted_mask.astype(shifted_image.dtype) * 0.5 + 0.5)
+
+        #ref_masked = ref_image * ref_mask.astype(ref_image.dtype)
+        #mov_masked = shifted_image * shifted_mask.astype(shifted_image.dtype)
+
+        #ref_masked = ref_image 
+        #mov_masked = shifted_image
         
         shift_yx, error, diffphase = phase_cross_correlation(
             ref_masked,
@@ -548,7 +609,7 @@ def iterative_align_refinement_with_perceptual_loss(
         )
         shifted_mask_new = shifted_mask_new > 0.5  # Re-binarize the mask
         
-        loss_new = compute_perceptual_loss(
+        loss_new = compute_combined_perceptual_mse_loss(
             model=model,
             ref_image=ref_image,
             mov_image=shifted_image_new,
@@ -773,7 +834,7 @@ def preprocess_imgset(base_dir, feature_extractor, device):
     # Save the downscaled HR image and mask
     hr_downscaled_path = os.path.join(base_dir, 'hr_downscaled.png')
     sm_downscaled_path = os.path.join(base_dir, 'sm_downscaled.png')
-    save_image(hr_downscaled, hr_downscaled_path, easy_display=True)
+    save_image(hr_downscaled, hr_downscaled_path, easy_display=False)
     save_image(sm_downscaled, sm_downscaled_path, dtype=np.bool_)
     
     # Iterate over LR and QM files together
@@ -839,7 +900,7 @@ def preprocess_imgset(base_dir, feature_extractor, device):
         shift_path = os.path.join(base_dir, shift_filename)
         
         # Save aligned images and masks
-        save_image(aligned_image, aligned_image_path, easy_display=True)
+        save_image(aligned_image, aligned_image_path, easy_display=False)
         save_image(aligned_mask, aligned_mask_path, dtype=np.bool_)
         
         # Save shift vectors
@@ -851,35 +912,6 @@ def preprocess_imgset(base_dir, feature_extractor, device):
         print(f"Shift History: {shifts_history}")
         print(f"Perceptual Loss History: {loss_history}")
 
-
-
-
-
-
-
-# Print the results
-#print(f"\nFinal cumulative shift: (y: {total_shift[0]:.5f}, x: {total_shift[1]:.5f})")
-#print(f"Shift History: {shifts_history}")
-#print(f"Perceptual Loss History: {loss_history}")
-
-'''
-# Visualize the registration results
-visualize_registration(
-    ref_image=ref_image,
-    initial_moving_image=initial_moving_image,
-    aligned_image=aligned_image,
-    ref_mask=ref_mask,
-    mov_mask=mov_mask
-)
-'''
-
-
-# In[60]:
-
-
-
-
-# In[ ]:
 
 
 
