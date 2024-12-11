@@ -219,7 +219,30 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     return total_loss
 
 
-# In[54]:
+def contrast_stretch_8bit(array):
+    """
+    Perform contrast stretching on a NumPy array to map its values to the 0-255 range.
+    """
+    # Convert to float to prevent overflow/underflow
+    array = array.astype(float)
+
+    # Compute minimum and maximum pixel values
+    min_val = np.min(array)
+    max_val = np.max(array)
+
+    print(f"contrast_stretch_8bit min = {min_val}, max = {max_val}")
+
+    # Avoid division by zero
+    if max_val - min_val == 0:
+        return np.zeros_like(array, dtype=np.uint8)
+
+    # Perform contrast stretching
+    stretched = (array - min_val) / (max_val - min_val) * 255.0
+
+    # Clip values to the 0-255 range and convert to uint8
+    stretched = np.clip(stretched, 0, 255).astype(np.uint8)
+
+    return stretched
 
 def min_max_scale(image):
     min_val = np.min(image)
