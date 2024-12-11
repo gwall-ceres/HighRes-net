@@ -7,6 +7,7 @@ from PyQt5.QtGui import QPixmap, QPainter, QColor
 import numpy as np
 from PyQt5.QtCore import Qt
 from scipy.ndimage import shift as ndimage_shift
+import cv2  # Added for optimized shifting
 
 # Suppress excessive matplotlib font manager logs
 logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
@@ -17,21 +18,77 @@ from matplotlib.figure import Figure
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-import registration_helpers as rh
 
+# Configuration loading function
+DEFAULT_CONFIG = {
+    "reference_image": "",
+    "reference_mask": "",
+    "template_image": "",
+    "template_mask": "",
+    "current_deltax": 0.0,
+    "current_deltay": 0.0,
+    "shift_step_x": 5.0,  # Example default shift steps
+    "shift_step_y": 5.0
+}
 
+def load_config(config_path='config.json'):
+    if not os.path.exists(config_path):
+        logging.warning(f"Config file '{config_path}' not found. Using default settings.")
+        return DEFAULT_CONFIG.copy()
+    
+    with open(config_path, 'r') as f:
+        try:
+            user_config = json.load(f)
+            logging.info(f"Loaded configuration from {config_path}.")
+        except json.JSONDecodeError as e:
+            logging.error(f"Error decoding JSON: {e}. Using default settings.")
+            return DEFAULT_CONFIG.copy()
+    
+    # Merge user_config with DEFAULT_CONFIG, preferring user_config values
+    config = DEFAULT_CONFIG.copy()
+    config.update({k: v for k, v in user_config.items() if k in DEFAULT_CONFIG})
+    
+    # Optionally, warn about any unknown fields
+    unknown_fields = set(user_config.keys()) - set(DEFAULT_CONFIG.keys())
+    if unknown_fields:
+        logging.warning(f"Unknown config fields detected and ignored: {unknown_fields}")
+    
+    return config
+
+def contrast_stretch(array):
+    """
+    Perform contrast stretching on a NumPy array to map its values to the 0-255 range.
+    """
+    logging.debug(f"Original array min: {array.min()}, max: {array.max()}")
+    array = array.astype(float)
+    min_val = np.min(array)
+    max_val = np.max(array)
+
+    # Avoid division by zero
+    if max_val - min_val == 0:
+        logging.warning("Max and min values are the same. Returning a zero array.")
+        return np.zeros_like(array, dtype=np.uint8)
+
+    # Perform contrast stretching
+    stretched = (array - min_val) / (max_val - min_val) * 255.0
+    logging.debug(f"Stretched array min: {stretched.min()}, max: {stretched.max()}")
+
+    # Clip values to the 0-255 range and convert to uint8
+    stretched = np.clip(stretched, 0, 255).astype(np.uint8)
+
+    logging.debug(f"Final stretched array min: {stretched.min()}, max: {stretched.max()}")
+    return stretched
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
         
         # ----- Load Configuration -----
-        self.config = rh.load_config()
+        self.config = load_config()
         logging.debug("Configuration loaded.")
         
         # ----- Menu Bar -----
         menubar = self.menuBar()
-        
         file_menu = menubar.addMenu("File")
         
         load_ref_action = QtWidgets.QAction("Load Reference Image", self)
@@ -147,12 +204,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Focus Policy for Keyboard Events -----
         self.setFocusPolicy(Qt.StrongFocus)
         
-        # ----- Initialize Pixmaps and Masks -----
-        self.ref_pixmap = None
-        self.template_pixmap = None
-        self.original_template_pixmap = None  # Store original template
-        self.ref_mask = None
-        self.template_mask = None
+        # ----- Initialize Image Arrays and Pixmaps -----
+        self.ref_image_array = None        # Original Reference Image (Grayscale)
+        self.ref_display_pixmap = None     # Display Reference Image (Contrast Stretched)
+        
+        self.template_image_array = None   # Original Template Image (Grayscale)
+        self.template_display_pixmap = None  # Display Template Image (Contrast Stretched)
+        
+        self.ref_mask_array = None         # Original Reference Mask (Grayscale)
+        self.ref_mask_pixmap = None
+        
+        self.template_mask_array = None    # Original Template Mask (Grayscale)
+        self.template_mask_pixmap = None
         
         # ----- Initialize Loss Histories -----
         self.mse_history = []
@@ -205,175 +268,179 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def load_image_from_path(self, image_type, filepath):
         """
-        Load an image or mask from the given filepath, apply contrast stretching, and update the pixmap.
+        Load an image or mask from the given filepath, store the original NumPy array,
+        apply contrast stretching if necessary, and update the display pixmap.
         """
-        pixmap = QPixmap(filepath)
-        if pixmap.isNull():
+        # Load image using QImage
+        qimage = QtGui.QImage(filepath)
+        if qimage.isNull():
             QtWidgets.QMessageBox.warning(self, "Load Image", f"Failed to load {image_type} from {filepath}.")
             logging.error(f"Failed to load {image_type} from {filepath}.")
             return
 
-        # Convert QPixmap to QImage
-        qimage = pixmap.toImage()
         logging.debug(f"Loaded {image_type} with format: {qimage.format()} and depth: {qimage.depth()}")
 
-        # Determine the appropriate format based on bit depth
-        if qimage.depth() == 16:
-            # Check if the image is grayscale or RGB
-            if qimage.format() == QtGui.QImage.Format_Grayscale16:
-                qimage = qimage.convertToFormat(QtGui.QImage.Format_Grayscale16)
-                logging.debug(f"Converted {image_type} to Grayscale16 format.")
-            elif qimage.format() == QtGui.QImage.Format_RGB16:
-                qimage = qimage.convertToFormat(QtGui.QImage.Format_RGB16)
-                logging.debug(f"Converted {image_type} to RGB16 format.")
-            else:
-                logging.warning(f"{image_type} has an unexpected 16-bit format: {qimage.format()}.")
-        else:
-            qimage = qimage.convertToFormat(QtGui.QImage.Format_RGB32)
-            logging.debug(f"Converted {image_type} to RGB32 format.")
+        # Determine if the image is grayscale
+        is_grayscale = qimage.isGrayscale()
+        logging.debug(f"Image {image_type} is {'grayscale' if is_grayscale else 'color'}.")
 
         # Convert QImage to NumPy array
         width = qimage.width()
         height = qimage.height()
-        ptr = qimage.bits()
-        ptr.setsize(qimage.byteCount())
 
-        if qimage.depth() == 16:
-            if qimage.format() == QtGui.QImage.Format_Grayscale16:
-                # Grayscale 16-bit
-                arr = np.frombuffer(ptr, dtype=np.uint16).reshape((height, width))
-                logging.debug(f"{image_type} NumPy array shape (grayscale 16-bit): {arr.shape}")
-                # Apply contrast stretching
-                arr_stretched = rh.contrast_stretch(arr)
-                logging.debug(f"Applied contrast stretching to {image_type} (grayscale 16-bit).")
-                # Convert to 8-bit
-                arr_stretched = arr_stretched.astype(np.uint8)
-                # Convert back to QImage
-                qimage = QtGui.QImage(arr_stretched.tobytes(), width, height, width, QtGui.QImage.Format_Grayscale8)
-                logging.debug(f"Converted {image_type} to Grayscale8 format after stretching.")
-            elif qimage.format() == QtGui.QImage.Format_RGB16:
-                # RGB 16-bit
-                arr = np.frombuffer(ptr, dtype=np.uint16).reshape((height, width, 3))
-                logging.debug(f"{image_type} NumPy array shape (RGB 16-bit): {arr.shape}")
-                # Apply contrast stretching to each channel
-                for channel in range(3):
-                    original_min, original_max = arr[:, :, channel].min(), arr[:, :, channel].max()
-                    arr[:, :, channel] = rh.contrast_stretch(arr[:, :, channel])
-                    logging.debug(f"Applied contrast stretching to {image_type} channel {channel}: min {original_min}, max {original_max}")
-                # Convert to 8-bit
-                arr = arr.astype(np.uint8)
-                # Convert back to QImage
-                qimage = QtGui.QImage(arr.tobytes(), width, height, 3 * width, QtGui.QImage.Format_RGB888)
-                logging.debug(f"Converted {image_type} to RGB888 format after stretching.")
+        if is_grayscale:
+            qimage = qimage.convertToFormat(QtGui.QImage.Format_Grayscale8)
+            logging.debug(f"Converted {image_type} to Grayscale8 format.")
+            ptr = qimage.bits()
+            ptr.setsize(qimage.byteCount())
+            arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width))
         else:
-            # Assuming RGB 8-bit
-            arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4))[:, :, :3]
-            logging.debug(f"{image_type} NumPy array shape (RGB 8-bit): {arr.shape}")
-            # Apply contrast stretching to each channel
-            for channel in range(3):
-                original_min, original_max = arr[:, :, channel].min(), arr[:, :, channel].max()
-                arr[:, :, channel] = rh.contrast_stretch(arr[:, :, channel])
-                logging.debug(f"Applied contrast stretching to {image_type} channel {channel}: min {original_min}, max {original_max}")
-            # Convert back to QImage
-            qimage = QtGui.QImage(arr.tobytes(), width, height, 3 * width, QtGui.QImage.Format_RGB888)
-            logging.debug(f"Converted {image_type} to RGB888 format after stretching.")
+            qimage = qimage.convertToFormat(QtGui.QImage.Format_RGB888)
+            logging.debug(f"Converted {image_type} to RGB888 format.")
+            ptr = qimage.bits()
+            ptr.setsize(qimage.byteCount())
+            arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 3))
 
-        # Convert QImage back to QPixmap
-        stretched_pixmap = QPixmap.fromImage(qimage)
-        logging.debug(f"Created stretched QPixmap for {image_type}.")
+        logging.debug(f"{image_type} NumPy array shape: {arr.shape}, dtype: {arr.dtype}")
 
-        # Assign to the correct attribute
+        # Assign to the correct attribute based on image type
         if image_type == "reference_image":
-            self.ref_pixmap = stretched_pixmap
+            self.ref_image_array = arr.copy()  # Store original
+            display_arr = contrast_stretch(self.ref_image_array)  # Apply contrast stretching for display
+            self.ref_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale)
         elif image_type == "template_image":
-            self.template_pixmap = stretched_pixmap
-            self.original_template_pixmap = stretched_pixmap  # Store original
+            self.template_image_array = arr.copy()  # Store original
+            display_arr = contrast_stretch(self.template_image_array)  # Apply contrast stretching for display
+            self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale)
         elif image_type == "reference_mask":
-            self.ref_mask = stretched_pixmap
+            self.ref_mask_array = arr.copy()  # Store original mask without contrast stretching
+            self.ref_mask_pixmap = self.array_to_qpixmap(self.ref_mask_array, is_grayscale)
         elif image_type == "template_mask":
-            self.template_mask = stretched_pixmap
+            self.template_mask_array = arr.copy()  # Store original mask without contrast stretching
+            self.template_mask_pixmap = self.array_to_qpixmap(self.template_mask_array, is_grayscale)
         else:
             logging.warning(f"Unknown image type: {image_type}")
-
-        logging.debug(f"Updated {image_type} pixmap attribute.")
-        self.update_overlay()
-
-    
-    def create_color_coded_overlay(self, ref_pixmap, template_pixmap):
-        """
-        Create a color-coded overlay where the reference image is mapped to the red channel
-        and the template image is mapped to the green channel.
-        """
-        if ref_pixmap is None or template_pixmap is None:
-            logging.debug("Cannot create overlay: one or both pixmaps are None.")
-            return QPixmap()
-
-        # Ensure both pixmaps are the same size
-        if ref_pixmap.size() != template_pixmap.size():
-            # Scale both pixmaps to the minimum size while keeping aspect ratio
-            min_width = min(ref_pixmap.width(), template_pixmap.width())
-            min_height = min(ref_pixmap.height(), template_pixmap.height())
-            ref_pixmap = ref_pixmap.scaled(min_width, min_height, Qt.KeepAspectRatio)
-            template_pixmap = template_pixmap.scaled(min_width, min_height, Qt.KeepAspectRatio)
-            logging.debug("Scaled reference and template pixmaps to the minimum common size.")
-
-        # Convert QPixmap to QImage
-        ref_qimage = ref_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        template_qimage = template_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        logging.debug("Converted pixmaps to QImage Format_RGB32.")
-
-        # Convert QImage to NumPy arrays
-        ref_buffer = ref_qimage.bits().asstring(ref_qimage.byteCount())
-        ref_array = np.frombuffer(ref_buffer, dtype=np.uint8).reshape((ref_qimage.height(), ref_qimage.width(), 4))[:, :, :3]
-
-        template_buffer = template_qimage.bits().asstring(template_qimage.byteCount())
-        template_array = np.frombuffer(template_buffer, dtype=np.uint8).reshape((template_qimage.height(), template_qimage.width(), 4))[:, :, :3]
-
-        logging.debug("Converted QImages to NumPy arrays.")
-
-        # Initialize overlay array with zeros
-        overlay_array = np.zeros_like(ref_array)
-
-        # Assign reference image to red channel
-        overlay_array[:, :, 0] = ref_array[:, :, 0]
-        logging.debug("Assigned reference image to red channel of overlay.")
-
-        # Assign template image to green channel
-        overlay_array[:, :, 1] = template_array[:, :, 1]
-        logging.debug("Assigned template image to green channel of overlay.")
-
-        # Blue channel remains zero
-        logging.debug("Blue channel remains zero in overlay.")
-
-        # Convert NumPy array back to QImage
-        height, width, channel = overlay_array.shape
-        bytes_per_line = 3 * width
-        overlay_qimage = QtGui.QImage(overlay_array.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888).copy()
-        logging.debug("Converted overlay NumPy array back to QImage.")
-
-        # Convert QImage back to QPixmap
-        overlay_pixmap = QPixmap.fromImage(overlay_qimage)
-        logging.debug("Converted overlay QImage to QPixmap.")
-
-        # Scale the overlay pixmap to fit the QLabel's size
-        label_size = self.overlay_image_label.size()
-        scaled_pixmap = overlay_pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        logging.debug("Scaled overlay pixmap to fit QLabel size.")
-
-        return scaled_pixmap
-
-    def update_overlay(self):
-        """
-        Update the overlay image based on the current reference and template pixmaps.
-        """
-        if self.ref_pixmap is None or self.template_pixmap is None:
-            self.overlay_image_label.setText("Overlay Image Here")
-            logging.debug("Overlay pixmap not updated because one of the images is None.")
             return
 
-        overlay_pixmap = self.create_color_coded_overlay(self.ref_pixmap, self.template_pixmap)
-        self.overlay_image_label.setPixmap(overlay_pixmap)
-        logging.debug("Overlay pixmap updated and set to QLabel.")
+        logging.debug(f"Stored {image_type} data.")
+
+        self.update_overlay()
+    
+    def array_to_qpixmap(self, array, is_grayscale):
+        """
+        Convert a NumPy array to QPixmap for display.
+        
+        Parameters:
+            array (np.ndarray): The image array.
+            is_grayscale (bool): Flag indicating if the image is grayscale.
+        
+        Returns:
+            QPixmap: The resulting pixmap.
+        """
+        try:
+            if is_grayscale:
+                height, width = array.shape
+                bytes_per_line = width
+                qimage = QtGui.QImage(array.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_Grayscale8)
+            else:
+                height, width, channels = array.shape
+                bytes_per_line = 3 * width
+                qimage = QtGui.QImage(array.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888)
+            
+            if qimage.isNull():
+                raise ValueError("QImage conversion resulted in a null image.")
+            
+            pixmap = QPixmap.fromImage(qimage)
+            logging.debug("Converted NumPy array to QPixmap.")
+            
+            # Optionally, scale the pixmap to fit the display label
+            label_size = self.overlay_image_label.size()
+            scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            logging.debug("Scaled QPixmap to fit QLabel size.")
+            
+            return scaled_pixmap
+        except Exception as e:
+            logging.error(f"Failed to convert array to QPixmap: {e}")
+            QtWidgets.QMessageBox.critical(self, "Image Conversion Error", f"Failed to convert image for display: {e}")
+            return QPixmap()
+
+    
+    def update_overlay(self):
+        """
+        Update the overlay image based on the current reference and template display pixmaps.
+        """
+        if self.ref_display_pixmap is None or self.template_display_pixmap is None:
+            self.overlay_image_label.setText("Overlay Image Here")
+            logging.debug("Overlay not updated: Reference or Template display pixmap is None.")
+            return
+
+        # Convert QPixmap back to QImage for processing
+        ref_qimage = self.ref_display_pixmap.toImage()
+        template_qimage = self.template_display_pixmap.toImage()
+
+        # Log the QImage formats
+        logging.debug(f"Reference QImage format: {ref_qimage.format()}")
+        logging.debug(f"Template QImage format: {template_qimage.format()}")
+
+        # Determine and handle the format of ref_qimage
+        if ref_qimage.format() == QtGui.QImage.Format_Grayscale8:
+            ref_array = np.frombuffer(ref_qimage.bits().asstring(ref_qimage.byteCount()), dtype=np.uint8).reshape((ref_qimage.height(), ref_qimage.width()))
+            logging.debug("Reference QImage is in Grayscale8 format.")
+        elif ref_qimage.format() in (QtGui.QImage.Format_RGB32, QtGui.QImage.Format_ARGB32):
+            # Extract the red channel as grayscale
+            ref_array = np.frombuffer(ref_qimage.bits().asstring(ref_qimage.byteCount()), dtype=np.uint8).reshape((ref_qimage.height(), ref_qimage.width(), 4))[:, :, 0]
+            logging.debug("Reference QImage is in RGB32/ARGB32 format. Extracted red channel as grayscale.")
+        else:
+            logging.error(f"Unsupported QImage format for reference image: {ref_qimage.format()}")
+            self.overlay_image_label.setText("Unsupported Format")
+            return
+
+        # Determine and handle the format of template_qimage
+        if template_qimage.format() == QtGui.QImage.Format_Grayscale8:
+            template_array = np.frombuffer(template_qimage.bits().asstring(template_qimage.byteCount()), dtype=np.uint8).reshape((template_qimage.height(), template_qimage.width()))
+            logging.debug("Template QImage is in Grayscale8 format.")
+        elif template_qimage.format() in (QtGui.QImage.Format_RGB32, QtGui.QImage.Format_ARGB32):
+            # Extract the green channel as grayscale
+            template_array = np.frombuffer(template_qimage.bits().asstring(template_qimage.byteCount()), dtype=np.uint8).reshape((template_qimage.height(), template_qimage.width(), 4))[:, :, 1]
+            logging.debug("Template QImage is in RGB32/ARGB32 format. Extracted green channel as grayscale.")
+        else:
+            logging.error(f"Unsupported QImage format for template image: {template_qimage.format()}")
+            self.overlay_image_label.setText("Unsupported Format")
+            return
+
+        logging.debug("Converted display QImages to NumPy arrays for overlay.")
+
+        # Ensure both images have the same dimensions
+        if ref_array.shape != template_array.shape:
+            logging.warning("Reference and Template images have different dimensions. Resizing Template to match Reference.")
+            # Resize template_array to match ref_array using OpenCV
+            resized_template = cv2.resize(template_array, (ref_qimage.width(), ref_qimage.height()), interpolation=cv2.INTER_LINEAR)
+            template_array = resized_template
+            logging.debug("Resized Template image to match Reference dimensions.")
+
+        # Create a 3-channel overlay
+        overlay_array = np.zeros((ref_array.shape[0], ref_array.shape[1], 3), dtype=np.uint8)
+        overlay_array[:, :, 0] = ref_array       # Red channel
+        overlay_array[:, :, 1] = template_array  # Green channel
+        # Blue channel remains zero
+        logging.debug("Created RGB overlay from grayscale images.")
+
+        # Convert the overlay array back to QImage and QPixmap
+        bytes_per_line = 3 * overlay_array.shape[1]
+        overlay_qimage = QtGui.QImage(overlay_array.tobytes(), overlay_array.shape[1], overlay_array.shape[0], bytes_per_line, QtGui.QImage.Format_RGB888).copy()
+        if overlay_qimage.isNull():
+            logging.error("Failed to create QImage from overlay array.")
+            self.overlay_image_label.setText("Overlay Creation Failed")
+            return
+
+        overlay_pixmap = QPixmap.fromImage(overlay_qimage)
+        logging.debug("Converted overlay NumPy array to QPixmap.")
+
+        # Scale the overlay pixmap to fit the QLabel's size
+        scaled_pixmap = overlay_pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.overlay_image_label.setPixmap(scaled_pixmap)
+        logging.debug("Set scaled overlay pixmap to QLabel.")
+
     
     def resizeEvent(self, event):
         """
@@ -421,72 +488,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Apply the shift to the template image and update the overlay
         self.apply_shift_and_update_overlay()
     
-    def apply_shift_and_update_overlay(self):
-        """
-        Shift the template image based on current_deltax and current_deltay,
-        update the overlay image, and recompute MSE and perceptual loss.
-        """
-        if self.original_template_pixmap is None or self.ref_pixmap is None:
-            logging.warning("Cannot apply shift: original_template_pixmap or ref_pixmap is None.")
-            return
-
-        # Convert original_template_pixmap to QImage
-        template_qimage = self.original_template_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        ref_qimage = self.ref_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        logging.debug("Converted original_template_pixmap and ref_pixmap to QImage Format_RGB32 for shifting.")
-
-        # Convert QImage to NumPy arrays
-        template_buffer = template_qimage.bits().asstring(template_qimage.byteCount())
-        template_array = np.frombuffer(template_buffer, dtype=np.uint8).reshape((template_qimage.height(), template_qimage.width(), 4))[:, :, :3]
-        logging.debug("Converted original_template_pixmap QImage to NumPy array.")
-
-        ref_buffer = ref_qimage.bits().asstring(ref_qimage.byteCount())
-        ref_array = np.frombuffer(ref_buffer, dtype=np.uint8).reshape((ref_qimage.height(), ref_qimage.width(), 4))[:, :, :3]
-        logging.debug("Converted ref_pixmap QImage to NumPy array.")
-
-        # Apply fractional shift using scipy.ndimage.shift
-        shifted_template = ndimage_shift(template_array, shift=(self.config["current_deltay"], self.config["current_deltax"], 0), order=1, mode='constant', cval=0)
-        logging.debug(f"Applied shift: Delta X={self.config['current_deltax']}, Delta Y={self.config['current_deltay']}")
-
-        # Convert shifted array back to QImage
-        height, width, channel = shifted_template.shape
-        bytes_per_line = 3 * width
-        shifted_qimage = QtGui.QImage(shifted_template.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888).copy()
-        logging.debug("Converted shifted NumPy array back to QImage.")
-
-        # Convert QImage back to QPixmap
-        shifted_pixmap = QPixmap.fromImage(shifted_qimage)
-        if shifted_pixmap.isNull():
-            logging.error("Shifted pixmap is null. QImage to QPixmap conversion failed.")
-        else:
-            logging.debug("Converted shifted QImage to QPixmap.")
-
-        # Update the template_pixmap with shifted image
-        self.template_pixmap = shifted_pixmap
-        logging.debug("Updated template_pixmap with shifted image.")
-
-        # Update the overlay
-        self.update_overlay()
-        logging.debug("Updated overlay after shifting.")
-
-        # Compute Losses
-        mse = self.compute_mse(ref_array, shifted_template)
-        pl = self.compute_perceptual_loss(ref_array, shifted_template)
-        logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
-
-        # Append to loss history
-        self.mse_history.append(mse)
-        self.pl_history.append(pl)
-        logging.debug(f"Appended MSE and Perceptual Loss to histories.")
-
-        # Update plots
-        self.update_plots(self.mse_history, self.pl_history)
-        logging.debug("Updated MSE and Perceptual Loss plots.")
-
-        # Update difference heatmap
-        self.update_difference_heatmap()
-        logging.debug("Updated difference heatmap.")
-
     def set_shift_x(self):
         """
         Handle updating the shift based on user input for Delta X.
@@ -502,7 +503,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.error("Invalid input for Current Delta X.")
             # Reset to previous valid value
             self.deltaX_edit.setText(str(self.config["current_deltax"]))
-
+    
     def set_shift_y(self):
         """
         Handle updating the shift based on user input for Delta Y.
@@ -518,14 +519,56 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.error("Invalid input for Current Delta Y.")
             # Reset to previous valid value
             self.deltaY_edit.setText(str(self.config["current_deltay"]))
+    
+    def apply_shift_and_update_overlay(self):
+        """
+        Shift the template image based on current_deltax and current_deltay,
+        update the overlay image, and recompute MSE and perceptual loss.
+        """
+        if self.template_image_array is None or self.ref_image_array is None:
+            logging.warning("Cannot apply shift: Original Template or Reference image is None.")
+            return
 
+        # Apply shift using OpenCV for better performance and accuracy
+        M = np.float32([[1, 0, self.config["current_deltax"]], [0, 1, self.config["current_deltay"]]])
+        shifted_template = cv2.warpAffine(self.template_image_array, M, (self.template_image_array.shape[1], self.template_image_array.shape[0]),
+                                         flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        logging.debug(f"Applied shift using OpenCV: Delta X={self.config['current_deltax']}, Delta Y={self.config['current_deltay']}")
+
+        # Update the display pixmap with the shifted image
+        shifted_display_arr = contrast_stretch(shifted_template)  # Apply contrast stretching for display
+        self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
+        logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
+
+        # Update the overlay
+        self.update_overlay()
+        logging.debug("Updated overlay after shifting.")
+
+        # Compute Losses
+        mse = self.compute_mse(self.ref_image_array, shifted_template)
+        pl = self.compute_perceptual_loss(self.ref_image_array, shifted_template)
+        logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
+
+        # Append to loss history
+        self.mse_history.append(mse)
+        self.pl_history.append(pl)
+        logging.debug("Appended MSE and Perceptual Loss to histories.")
+
+        # Update plots
+        self.update_plots(self.mse_history, self.pl_history)
+        logging.debug("Updated MSE and Perceptual Loss plots.")
+
+        # Update difference heatmap
+        self.update_difference_heatmap()
+        logging.debug("Updated difference heatmap.")
+    
     def compute_mse(self, ref, shifted):
         """
         Compute Mean Squared Error between reference and shifted template images.
         """
         mse = np.mean((ref.astype(float) - shifted.astype(float)) ** 2)
         return mse
-
+    
     def compute_perceptual_loss(self, ref, shifted):
         """
         Compute Perceptual Loss between reference and shifted template images.
@@ -534,25 +577,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Placeholder: using MSE as a stand-in
         pl = self.compute_mse(ref, shifted)
         return pl
-
+    
     def initialize_plots(self):
         """
-        Initialize the plots with empty data.
+        [As previously defined]
         """
-        self.mse_ax.clear()
-        self.mse_ax.set_title("MSE over Shifts")
-        self.mse_ax.set_xlabel("Shift Steps")
-        self.mse_ax.set_ylabel("MSE")
-        self.mse_ax.plot([], [], 'r-')
-        self.mse_canvas.draw()
-
-        self.pl_ax.clear()
-        self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_xlabel("Shift Steps")
-        self.pl_ax.set_ylabel("Perceptual Loss")
-        self.pl_ax.plot([], [], 'b-')
-        self.pl_canvas.draw()
-        logging.debug("Initialized MSE and Perceptual Loss plots.")
+        # ... [Existing code] ...
     
     def update_plots(self, mse_values, pl_values):
         """
@@ -578,56 +608,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.plot(shift_steps, pl_values, 'b-')
         self.pl_canvas.draw()
         logging.debug("Updated Perceptual Loss plot.")
-
+    
     def compute_difference_heatmap(self):
         """
         Compute the masked difference heatmap between reference and shifted template images.
         """
-        if self.ref_pixmap is None or self.template_pixmap is None:
-            logging.warning("Cannot compute difference heatmap: one or both pixmaps are None.")
+        if self.ref_image_array is None or self.template_image_array is None:
+            logging.warning("Cannot compute difference heatmap: Reference or Template image array is None.")
             return QPixmap()
 
-        # Convert QPixmap to QImage
-        ref_qimage = self.ref_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        template_qimage = self.template_pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGB32)
-        logging.debug("Converted reference and template pixmaps to QImage for difference computation.")
-
-        # Convert QImage to NumPy arrays
-        ref_buffer = ref_qimage.bits().asstring(ref_qimage.byteCount())
-        ref_array = np.frombuffer(ref_buffer, dtype=np.uint8).reshape((ref_qimage.height(), ref_qimage.width(), 4))[:, :, :3]
-
-        template_buffer = template_qimage.bits().asstring(template_qimage.byteCount())
-        template_array = np.frombuffer(template_buffer, dtype=np.uint8).reshape((template_qimage.height(), template_qimage.width(), 4))[:, :, :3]
-
-        logging.debug("Converted QImages to NumPy arrays for difference computation.")
+        # Apply current shifts to the template image
+        M = np.float32([[1, 0, self.config["current_deltax"]], [0, 1, self.config["current_deltay"]]])
+        shifted_template = cv2.warpAffine(self.template_image_array, M, (self.template_image_array.shape[1], self.template_image_array.shape[0]),
+                                         flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        logging.debug(f"Applied shift for difference heatmap using OpenCV: Delta X={self.config['current_deltax']}, Delta Y={self.config['current_deltay']}")
 
         # Compute absolute difference
-        diff_array = np.abs(ref_array.astype(float) - template_array.astype(float))
-        logging.debug("Computed absolute difference between reference and template images.")
-
-        # Compute grayscale difference
-        diff_gray = np.mean(diff_array, axis=2)
-        logging.debug("Computed grayscale difference.")
-
-        # Normalize to 0-255
-        diff_normalized = rh.contrast_stretch(diff_gray)
-        logging.debug("Applied contrast stretching to difference image.")
+        diff_array = np.abs(self.ref_image_array.astype(float) - shifted_template.astype(float))
+        logging.debug("Computed absolute difference between Reference and Shifted Template images.")
 
         # Apply masks if available
-        if self.ref_mask is not None and self.template_mask is not None:
-            # Convert masks to QImage
-            ref_mask_qimage = self.ref_mask.toImage().convertToFormat(QtGui.QImage.Format_Grayscale8)
-            template_mask_qimage = self.template_mask.toImage().convertToFormat(QtGui.QImage.Format_Grayscale8)
-            # Convert QImage to NumPy arrays
-            ref_mask_buffer = ref_mask_qimage.bits().asstring(ref_mask_qimage.byteCount())
-            ref_mask = np.frombuffer(ref_mask_buffer, dtype=np.uint8).reshape((ref_mask_qimage.height(), ref_mask_qimage.width()))
-            template_mask_buffer = template_mask_qimage.bits().asstring(template_mask_qimage.byteCount())
-            template_mask = np.frombuffer(template_mask_buffer, dtype=np.uint8).reshape((template_mask_qimage.height(), template_mask_qimage.width()))
-            # Combine masks
-            combined_mask = (ref_mask > 0) & (template_mask > 0)
-            # Apply mask to difference
-            diff_normalized[~combined_mask] = 0
+        if self.ref_mask_array is not None and self.template_mask_array is not None:
+            combined_mask = (self.ref_mask_array > 0) & (self.template_mask_array > 0)
+            diff_array[~combined_mask] = 0
             logging.debug("Applied combined masks to difference image.")
+
+        # Normalize the difference for heatmap visualization
+        diff_normalized = contrast_stretch(diff_array)
+        logging.debug("Applied contrast stretching to difference image for heatmap.")
 
         # Apply color map (e.g., Jet) using matplotlib
         colored_diff = plt.get_cmap('jet')(diff_normalized / 255.0)[:, :, :3]  # Ignore alpha
@@ -638,18 +646,19 @@ class MainWindow(QtWidgets.QMainWindow):
         logging.debug("Converted color-mapped difference image to 8-bit.")
 
         # Convert NumPy array to QImage
-        height, width, channel = colored_diff.shape
+        height, width = colored_diff.shape[:2]
         bytes_per_line = 3 * width
         heatmap_qimage = QtGui.QImage(colored_diff.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888).copy()
-        logging.debug("Converted colored difference NumPy array to QImage.")
-
-        # Convert QImage back to QPixmap
+        if heatmap_qimage.isNull():
+            logging.error("Failed to create QImage from difference heatmap array.")
+            return QPixmap()
+        
+        # Convert QImage to QPixmap
         heatmap_pixmap = QPixmap.fromImage(heatmap_qimage)
         logging.debug("Converted difference QImage to QPixmap.")
 
         # Scale to fit the diff_image_label
-        label_size = self.diff_image_label.size()
-        scaled_pixmap = heatmap_pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = heatmap_pixmap.scaled(self.diff_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         logging.debug("Scaled difference pixmap to fit QLabel size.")
 
         return scaled_pixmap
@@ -659,8 +668,12 @@ class MainWindow(QtWidgets.QMainWindow):
         Update the difference heatmap display.
         """
         heatmap_pixmap = self.compute_difference_heatmap()
-        self.diff_image_label.setPixmap(heatmap_pixmap)
-        logging.debug("Set updated difference pixmap to QLabel.")
+        if not heatmap_pixmap.isNull():
+            self.diff_image_label.setPixmap(heatmap_pixmap)
+            logging.debug("Set updated difference pixmap to QLabel.")
+        else:
+            self.diff_image_label.setText("Difference Heatmap Failed")
+            logging.error("Failed to update difference heatmap.")
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
