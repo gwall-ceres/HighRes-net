@@ -12,9 +12,10 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import registration_helpers as rh
 import preprocess_images as ppi
+from heatmap_canvas import HeatmapCanvas
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.debug, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Suppress excessive matplotlib font manager logs
 logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
@@ -24,101 +25,99 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
 
-        #here we initialize a deep neural network, VGG, which will be used to compute the perceptual loss
+        # Initialize the perceptual loss model
         self.perceptual_loss_model = ppi.init_VGG_for_perceptual_loss()
-        
+
         # ----- Load Configuration -----
         self.config = rh.load_config()
         #logging.debug("Configuration loaded.")
-        
+
         # ----- Menu Bar -----
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
-        
+
         load_ref_action = QtWidgets.QAction("Load Reference Image", self)
         load_ref_action.triggered.connect(lambda: self.load_image("reference_image"))
         file_menu.addAction(load_ref_action)
-        
+
         load_ref_mask_action = QtWidgets.QAction("Load Reference Mask", self)
         load_ref_mask_action.triggered.connect(lambda: self.load_image("reference_mask"))
         file_menu.addAction(load_ref_mask_action)
-        
+
         load_template_action = QtWidgets.QAction("Load Template Image", self)
         load_template_action.triggered.connect(lambda: self.load_image("template_image"))
         file_menu.addAction(load_template_action)
-        
+
         load_template_mask_action = QtWidgets.QAction("Load Template Mask", self)
         load_template_mask_action.triggered.connect(lambda: self.load_image("template_mask"))
         file_menu.addAction(load_template_mask_action)
-        
+
         # ----- Central Widget and Layout -----
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QVBoxLayout(central_widget)
-        
+
         # ----- Controls for current deltaX, deltaY -----
         current_shift_layout = QtWidgets.QHBoxLayout()
         self.deltaX_edit = QtWidgets.QLineEdit()
         self.deltaY_edit = QtWidgets.QLineEdit()
-        
+
         self.deltaX_edit.setPlaceholderText("Current Delta X")
         self.deltaY_edit.setPlaceholderText("Current Delta Y")
-        
+
         # Populate with config values
         self.deltaX_edit.setText(str(self.config["current_deltax"]))
         self.deltaY_edit.setText(str(self.config["current_deltay"]))
-        
+
         # Connect signals for updating shifts
         self.deltaX_edit.editingFinished.connect(self.set_shift_x)
         self.deltaY_edit.editingFinished.connect(self.set_shift_y)
-        
+
         current_shift_layout.addWidget(QtWidgets.QLabel("Current ΔX:"))
         current_shift_layout.addWidget(self.deltaX_edit)
         current_shift_layout.addWidget(QtWidgets.QLabel("Current ΔY:"))
         current_shift_layout.addWidget(self.deltaY_edit)
-        
+
         main_layout.addLayout(current_shift_layout)
-        
+
         # ----- Controls for shift steps -----
         shift_step_layout = QtWidgets.QHBoxLayout()
         self.shift_step_x_edit = QtWidgets.QLineEdit()
         self.shift_step_y_edit = QtWidgets.QLineEdit()
-        
+
         self.shift_step_x_edit.setPlaceholderText("Shift Step X")
         self.shift_step_y_edit.setPlaceholderText("Shift Step Y")
-        
+
         # Populate with config values
         self.shift_step_x_edit.setText(str(self.config["shift_step_x"]))
         self.shift_step_y_edit.setText(str(self.config["shift_step_y"]))
-        
+
         shift_step_layout.addWidget(QtWidgets.QLabel("Shift Step X:"))
         shift_step_layout.addWidget(self.shift_step_x_edit)
         shift_step_layout.addWidget(QtWidgets.QLabel("Shift Step Y:"))
         shift_step_layout.addWidget(self.shift_step_y_edit)
-        
+
         main_layout.addLayout(shift_step_layout)
-        
+
         # ----- Image Display Layout -----
         images_layout = QtWidgets.QHBoxLayout()
-        
+
         # Placeholder for reference+template overlay image
         self.overlay_image_label = QtWidgets.QLabel("Overlay Image Here")
         self.overlay_image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.overlay_image_label.setStyleSheet("border: 1px solid gray;")
-        
-        # Placeholder for masked difference image
-        self.diff_image_label = QtWidgets.QLabel("Masked Difference Image Here")
-        self.diff_image_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.diff_image_label.setStyleSheet("border: 1px solid gray;")
-        
         images_layout.addWidget(self.overlay_image_label)
-        images_layout.addWidget(self.diff_image_label)
-        
+
+        # HeatmapCanvas for the difference heatmap
+        self.heatmap_canvas = HeatmapCanvas(self, width=5, height=4, dpi=100)
+        self.heatmap_canvas.setStyleSheet("border: 1px solid gray;")
+        images_layout.addWidget(self.heatmap_canvas)
+
         main_layout.addLayout(images_layout)
-        
+
         # ----- Graphs Layout -----
         graphs_layout = QtWidgets.QHBoxLayout()
-        
+
         # Initialize MSE Plot
         self.mse_fig = Figure(figsize=(4, 2))
         self.mse_canvas = FigureCanvas(self.mse_fig)
@@ -127,7 +126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mse_ax.set_xlabel("Shift Steps")
         self.mse_ax.set_ylabel("MSE")
         graphs_layout.addWidget(self.mse_canvas)
-        
+
         # Initialize Perceptual Loss Plot
         self.pl_fig = Figure(figsize=(4, 2))
         self.pl_canvas = FigureCanvas(self.pl_fig)
@@ -136,38 +135,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_xlabel("Shift Steps")
         self.pl_ax.set_ylabel("Perceptual Loss")
         graphs_layout.addWidget(self.pl_canvas)
-        
+
         main_layout.addLayout(graphs_layout)
-        
+
         # ----- Set Window Properties -----
         self.setWindowTitle("Interactive Image Alignment Tool")
-        self.resize(850, 1000)  # Adjust as needed to accommodate image and graph sizes
-        
+        self.resize(1200, 800)  # Adjust as needed to accommodate image and graph sizes
+
         # ----- Focus Policy for Keyboard Events -----
         self.setFocusPolicy(Qt.StrongFocus)  # Now works because Qt is imported
-        
+
         # ----- Initialize Image Arrays and Pixmaps -----
-        self.ref_image_array = None        # Original Reference Image (Grayscale)
-        self.ref_display_pixmap = None     # Display Reference Image (Contrast Stretched)
-        
-        self.template_image_array = None   # Original Template Image (Grayscale)
+        self.ref_image_array = None  # Original Reference Image (Grayscale)
+        self.ref_display_pixmap = None  # Display Reference Image (Contrast Stretched)
+
+        self.template_image_array = None  # Original Template Image (Grayscale)
         self.template_display_pixmap = None  # Display Template Image (Contrast Stretched)
-        
-        #self.shifted_template_image_array = None  # Shifted Template Image
-        
-        self.ref_mask_array = None         # Original Reference Mask (Grayscale)
+
+        self.ref_mask_array = None  # Original Reference Mask (Grayscale)
         self.ref_mask_pixmap = None
-        
-        self.template_mask_array = None    # Original Template Mask (Grayscale)
+
+        self.template_mask_array = None  # Original Template Mask (Grayscale)
         self.template_mask_pixmap = None
-        
+
         # ----- Initialize Loss Histories -----
         self.mse_history = []
         self.pl_history = []
-        
+
         # ----- Initialize Plots -----
         self.initialize_plots()
-        
+
         # ----- Automatically Load Images from Config -----
         if self.config["reference_image"]:
             self.load_image_from_path("reference_image", self.config["reference_image"])
@@ -196,51 +193,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.plot([], [], 'b-')
         self.pl_canvas.draw()
         #logging.debug("Initialized MSE and Perceptual Loss plots.")
-    
+
     def load_image(self, image_type):
         """
         Open a file dialog to load an image or mask.
         """
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, 
-            f"Select {image_type.replace('_', ' ').title()}", 
-            "", 
+            self,
+            f"Select {image_type.replace('_', ' ').title()}",
+            "",
             "Image Files (*.png *.jpg *.bmp)"
         )
         if fname:
             self.load_image_from_path(image_type, fname)
-    
+
     def load_image_from_path(self, image_type, filepath):
         """
         Load an image or mask from the given filepath, store the original NumPy array,
         and update the display pixmap with contrast stretching if it's an image (not a mask).
         """
-        '''
-        # Load image using QImage
-        qimage = QtGui.QImage(filepath)
-        if qimage.isNull():
-            QtWidgets.QMessageBox.warning(self, "Load Image", f"Failed to load {image_type} from {filepath}.")
-            logging.error(f"Failed to load {image_type} from {filepath}.")
-            return
-
-        #logging.debug(f"Loaded {image_type} with format: {qimage.format()} and depth: {qimage.depth()}")
-
-        # Ensure the image is grayscale
-        if not qimage.isGrayscale():
-            QtWidgets.QMessageBox.warning(self, "Load Image", f"The {image_type} must be a grayscale image.")
-            logging.error(f"The {image_type} is not a grayscale image.")
-            return
-
-        # Convert QImage to Grayscale8 format
-        qimage = qimage.convertToFormat(QtGui.QImage.Format_Grayscale8)
-        #logging.debug(f"Converted {image_type} to Grayscale8 format.")
-
-        width = qimage.width()
-        height = qimage.height()
-        ptr = qimage.bits()
-        ptr.setsize(qimage.byteCount())
-        #arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width))
-        '''
+        # Use scikit-image to load images
         arr = ppi.read_image(filepath)
         #logging.debug(f"{image_type} NumPy array shape: {arr.shape}, dtype: {arr.dtype}")
 
@@ -253,15 +225,14 @@ class MainWindow(QtWidgets.QMainWindow):
         elif image_type == "template_image":
             self.template_image_array = arr.astype(np.float32)  # Store original
             self.template_image_array.flags.writeable = False
-            #self.shifted_template_image_array = self.template_image_array.copy()  # Initialize shifted image
             display_arr = rh.contrast_stretch(self.template_image_array)  # Apply contrast stretching for display
             self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
         elif image_type == "reference_mask":
-            self.ref_mask_array = arr.copy().astype(np.bool)  # Store original mask without contrast stretching
+            self.ref_mask_array = arr.astype(bool)  # Store original mask without contrast stretching
             self.ref_mask_array.flags.writeable = False
             self.ref_mask_pixmap = self.array_to_qpixmap(self.ref_mask_array, is_grayscale=True)
         elif image_type == "template_mask":
-            self.template_mask_array = arr.copy().astype(np.bool)  # Store original mask without contrast stretching
+            self.template_mask_array = arr.astype(bool)  # Store original mask without contrast stretching
             self.template_mask_array.flags.writeable = False
             self.template_mask_pixmap = self.array_to_qpixmap(self.template_mask_array, is_grayscale=True)
         else:
@@ -289,15 +260,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
 
         self.update_overlay(self.template_image_array)
-    
+
     def array_to_qpixmap(self, array, is_grayscale):
         """
         Convert a NumPy array to QPixmap for display.
-        
+
         Parameters:
             array (np.ndarray): The image array.
             is_grayscale (bool): Flag indicating if the image is grayscale.
-        
+
         Returns:
             QPixmap: The resulting pixmap.
         """
@@ -311,30 +282,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 height, width, channels = array.shape
                 bytes_per_line = 3 * width
                 qimage = QtGui.QImage(array.tobytes(), width, height, bytes_per_line, QtGui.QImage.Format_RGB888)
-            
+
             if qimage.isNull():
                 raise ValueError("QImage conversion resulted in a null image.")
-            
+
             pixmap = QPixmap.fromImage(qimage)
             #logging.debug("Converted NumPy array to QPixmap.")
-            
+
             # Optionally, scale the pixmap to fit the display label
             scaled_pixmap = pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             #logging.debug("Scaled QPixmap to fit QLabel size.")
-            
+
             return scaled_pixmap
         except Exception as e:
             logging.error(f"Failed to convert array to QPixmap: {e}")
             QtWidgets.QMessageBox.critical(self, "Image Conversion Error", f"Failed to convert image for display: {e}")
             return QPixmap()
-    
+
     def update_overlay(self, shifted_template_image):
         """
         Update the overlay image based on the current reference and shifted template image arrays,
         applying contrast stretching to brighten the display.
 
         Args:
-            shifted_template_image:
+            shifted_template_image (np.ndarray): Shifted template image array.
         """
         if self.ref_image_array is None or shifted_template_image is None:
             self.overlay_image_label.setText("Overlay Image Here")
@@ -347,16 +318,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create a 3-channel RGB overlay using the enhanced arrays
         overlay_array = np.zeros((self.ref_image_array.shape[0], self.ref_image_array.shape[1], 3), dtype=np.uint8)
-        overlay_array[:, :, 0] = template_enhanced        # Red channel (Reference Image)
-        overlay_array[:, :, 1] = ref_enhanced    # Green channel (Shifted Template Image)
-        overlay_array[:, :, 2] = ref_enhanced
-     
+        overlay_array[:, :, 0] = template_enhanced  # Red channel (Template Image)
+        overlay_array[:, :, 1] = ref_enhanced  # Green channel (Reference Image)
+        overlay_array[:, :, 2] = 0  # Blue channel remains zero
 
         #logging.debug("Created RGB overlay from enhanced reference and shifted template images.")
 
         # Convert the overlay array to QImage
         bytes_per_line = 3 * overlay_array.shape[1]
-        overlay_qimage = QtGui.QImage(overlay_array.tobytes(), overlay_array.shape[1], overlay_array.shape[0], bytes_per_line, QtGui.QImage.Format_RGB888)
+        overlay_qimage = QtGui.QImage(overlay_array.tobytes(), overlay_array.shape[1], overlay_array.shape[0],
+                                      bytes_per_line, QtGui.QImage.Format_RGB888)
 
         if overlay_qimage.isNull():
             logging.error("Failed to create QImage from overlay array.")
@@ -368,19 +339,22 @@ class MainWindow(QtWidgets.QMainWindow):
         #logging.debug("Converted overlay NumPy array to QPixmap.")
 
         # Scale the pixmap to fit the QLabel's size
-        scaled_pixmap = overlay_pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = overlay_pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio,
+                                              Qt.SmoothTransformation)
         self.overlay_image_label.setPixmap(scaled_pixmap)
         #logging.debug("Set scaled overlay pixmap to QLabel.")
 
-    
     def resizeEvent(self, event):
         """
         Override the resizeEvent to rescale the overlay pixmap when the window is resized.
         """
-        #self.update_overlay()
         super(MainWindow, self).resizeEvent(event)
+        if self.template_image_array is not None:
+            self.update_overlay(self.template_image_array)
+        if self.heatmap_canvas:
+            self.heatmap_canvas.draw()
         #logging.debug("Handled window resize event and updated overlay.")
-    
+
     def keyPressEvent(self, event):
         """
         Handle key press events for shifting the template image.
@@ -418,7 +392,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Apply the shift to the template image and update the overlay
         self.apply_shift_and_update_overlay()
-    
+
+    def closeEvent(self, event):
+        """
+        Handle the close event to ensure proper cleanup.
+        """
+        try:
+            logging.debug("Closing MainWindow and performing cleanup.")
+            # Perform any additional cleanup here if necessary
+        except Exception as e:
+            logging.error(f"Error during cleanup: {e}")
+        finally:
+            super(MainWindow, self).closeEvent(event)
+
     def set_shift_x(self):
         """
         Handle updating the shift based on user input for Delta X.
@@ -434,7 +420,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.error("Invalid input for Current Delta X.")
             # Reset to previous valid value
             self.deltaX_edit.setText(str(self.config["current_deltax"]))
-    
+
     def set_shift_y(self):
         """
         Handle updating the shift based on user input for Delta Y.
@@ -450,7 +436,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.error("Invalid input for Current Delta Y.")
             # Reset to previous valid value
             self.deltaY_edit.setText(str(self.config["current_deltay"]))
-    
+
     def apply_shift_and_update_overlay(self):
         """
         Shift the template image and its mask based on current_deltax and current_deltay,
@@ -528,17 +514,16 @@ class MainWindow(QtWidgets.QMainWindow):
         #logging.debug("Updated MSE and Perceptual Loss plots.")
 
         # Update difference heatmap
-        self.update_difference_heatmap(shifted_image, shifted_mask)
-        #logging.debug("Updated difference heatmap.")
+        self.compute_and_display_heatmap(shifted_image, shifted_mask)
+        #logging.debug("Computed and displayed difference heatmap.")
 
-    
     def compute_mse(self, shifted_template, shifted_template_mask):
         """
         Compute Mean Squared Error between reference and shifted template images.
         """
         mse = ppi.compute_mse(self.ref_image_array, self.ref_mask_array, shifted_template, shifted_template_mask)
         return mse
-    
+
     def compute_perceptual_loss(self, shifted_template, shifted_template_mask):
         """
         Compute Perceptual Loss between reference and shifted template images.
@@ -547,26 +532,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Placeholder: using MSE as a stand-in
         pl = self.compute_mse(shifted_template, shifted_template_mask)
         return pl
-    
-    def initialize_plots(self):
-        """
-        Initialize the plots with empty data.
-        """
-        self.mse_ax.clear()
-        self.mse_ax.set_title("MSE over Shifts")
-        self.mse_ax.set_xlabel("Shift Steps")
-        self.mse_ax.set_ylabel("MSE")
-        self.mse_ax.plot([], [], 'r-')
-        self.mse_canvas.draw()
 
-        self.pl_ax.clear()
-        self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_xlabel("Shift Steps")
-        self.pl_ax.set_ylabel("Perceptual Loss")
-        self.pl_ax.plot([], [], 'b-')
-        self.pl_canvas.draw()
-        #logging.debug("Initialized MSE and Perceptual Loss plots.")
-    
     def update_plots(self, mse_values, pl_values):
         """
         Update the plots with new MSE and perceptual loss values.
@@ -592,129 +558,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_canvas.draw()
         #logging.debug("Updated Perceptual Loss plot.")
 
-
-    def compute_difference_heatmap2(self, shifted_template_image, shifted_template_mask):
+    def compute_and_display_heatmap(self, shifted_template_image, shifted_template_mask):
         """
-        Compute the masked difference heatmap between reference and shifted template images.
+        Compute and display the masked difference heatmap between reference and shifted template images.
 
         Args:
-            shifted_template_image: numpy float type 2d array
-            shifted_template_mask: numpy bool type 2d array
+            shifted_template_image (np.ndarray): Shifted template image array.
+            shifted_template_mask (np.ndarray): Shifted template mask array.
+        """
+        try:
+            self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
+        except Exception as e:
+            logging.error(f"Error computing and displaying heatmap: {e}")
+            QtWidgets.QMessageBox.critical(self, "Heatmap Error", f"Failed to compute heatmap: {e}")
+
+    def compute_difference_heatmap(self, shifted_template_image, shifted_template_mask):
+        """
+        Compute and display the masked difference heatmap between reference and shifted template images.
+
+        Args:
+            shifted_template_image (np.ndarray): Shifted template image array.
+            shifted_template_mask (np.ndarray): Shifted template mask array.
         """
         if self.ref_image_array is None or shifted_template_image is None:
             logging.warning("Cannot compute difference heatmap: Reference or Shifted Template image array is None.")
-            return QPixmap()
+            return
 
+        if self.ref_mask_array is None or shifted_template_mask is None:
+            logging.warning("Cannot compute difference heatmap: Reference or Shifted Template mask is None.")
+            return
+
+        # Combine masks
         combined_mask = np.logical_and(self.ref_mask_array, shifted_template_mask)
         if not np.any(combined_mask):
             logging.warning("No overlapping valid pixels found between the two masks.")
-            return QPixmap()
+            return
 
-        print(f"numpy data types = {self.ref_image_array.dtype, self.ref_mask_array.dtype, shifted_template_image.dtype, shifted_template_mask.dtype}")
+        #logging.debug(f"Combined mask has {np.sum(combined_mask)} valid pixels.")
+
         # Normalize the reference image
         mean_ref = np.mean(self.ref_image_array[combined_mask])
         std_ref = np.std(self.ref_image_array[combined_mask])
-        normed_ref = np.zeros_like(self.ref_image_array)
+        normed_ref = np.zeros_like(self.ref_image_array, dtype=float)
         normed_ref[combined_mask] = (self.ref_image_array[combined_mask] - mean_ref) / std_ref
 
         # Normalize the template image
         mean_template = np.mean(shifted_template_image[combined_mask])
         std_template = np.std(shifted_template_image[combined_mask])
-        normed_template = np.zeros_like(shifted_template_image)
+        normed_template = np.zeros_like(shifted_template_image, dtype=float)
         normed_template[combined_mask] = (shifted_template_image[combined_mask] - mean_template) / std_template
 
         # Compute absolute difference
         diff_array = np.abs(normed_ref - normed_template)
 
-        # Normalize the difference for heatmap visualization
-        diff_normalized = rh.contrast_stretch(diff_array)
+        # Plot the heatmap using the updated HeatmapCanvas
+        self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 
-        # Apply color map (e.g., Jet) using matplotlib
-        cmap = plt.get_cmap('jet')
-        # Normalize diff_normalized to [0, 1] for colormap
-        # Assuming diff_normalized is already in [0, 255], adjust if necessary
-        colored_diff = cmap(diff_normalized / 255.0)
-        colored_diff = cmap(shifted_template_mask)
-        # Ignore alpha channel
-        colored_diff = (colored_diff[:, :, :3] * 255).astype(np.uint8)
+        #logging.debug("Displayed difference heatmap using matplotlib's imshow.")
 
-        # Convert NumPy array to QImage
-        height, width = colored_diff.shape[:2]
-        bytes_per_line = 3 * width
-        heatmap_qimage = QtGui.QImage(colored_diff.tobytes(), width, height, bytes_per_line,
-                                      QtGui.QImage.Format_RGB888).copy()
-        if heatmap_qimage.isNull():
-            logging.error("Failed to create QImage from difference heatmap array.")
-            return QPixmap()
-
-        # Convert QImage to QPixmap
-        heatmap_pixmap = QPixmap.fromImage(heatmap_qimage)
-
-        # Scale to fit the diff_image_label
-        scaled_pixmap = heatmap_pixmap.scaled(self.diff_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-        return scaled_pixmap
-
-    def compute_difference_heatmap(self, shifted_template_image, shifted_template_mask):
-        """
-        Compute the masked difference heatmap between reference and shifted template images.
-        """
-        if self.ref_image_array is None or shifted_template_image is None:
-            logging.warning("Cannot compute difference heatmap: Reference or Shifted Template image array is None.")
-            return QPixmap()
-
-        # Compute absolute difference
-        diff_array = np.abs(self.ref_image_array.astype(float) - shifted_template_image.astype(float))
-        logging.debug("Computed absolute difference between Reference and Shifted Template images.")
-
-        # Apply masks if available
-        if self.ref_mask_array is not None and shifted_template_mask is not None:
-            combined_mask = (self.ref_mask_array > 0) & (shifted_template_mask > 0)
-            diff_array[~combined_mask] = 0
-            logging.debug("Applied combined masks to difference image.")
-
-        # Normalize the difference for heatmap visualization
-        diff_normalized = rh.contrast_stretch(diff_array)
-        logging.debug("Applied contrast stretching to difference image for heatmap.")
-
-        # Apply color map (e.g., Jet) using matplotlib
-        colored_diff = plt.get_cmap('jet')(diff_normalized / 255.0)[:, :, :3]  # Ignore alpha
-        logging.debug("Applied Jet color map to difference image.")
-
-        # Convert to 8-bit
-        colored_diff = (colored_diff * 255).astype(np.uint8)
-        logging.debug("Converted color-mapped difference image to 8-bit.")
-
-        # Convert NumPy array to QImage
-        height, width = colored_diff.shape[:2]
-        bytes_per_line = 3 * width
-        heatmap_qimage = QtGui.QImage(colored_diff.tobytes(), width, height, bytes_per_line,
-                                      QtGui.QImage.Format_RGB888).copy()
-        if heatmap_qimage.isNull():
-            logging.error("Failed to create QImage from difference heatmap array.")
-            return QPixmap()
-
-        # Convert QImage to QPixmap
-        heatmap_pixmap = QPixmap.fromImage(heatmap_qimage)
-        logging.debug("Converted difference QImage to QPixmap.")
-
-        # Scale to fit the diff_image_label
-        scaled_pixmap = heatmap_pixmap.scaled(self.diff_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        logging.debug("Scaled difference pixmap to fit QLabel size.")
-
-        return scaled_pixmap
-
-    def update_difference_heatmap(self, shifted_template_image, shifted_template_mask):
-        """
-        Update the difference heatmap display.
-        """
-        heatmap_pixmap = self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
-        if not heatmap_pixmap.isNull():
-            self.diff_image_label.setPixmap(heatmap_pixmap)
-            logging.debug("Set updated difference pixmap to QLabel.")
-        else:
-            self.diff_image_label.setText("Difference Heatmap Failed")
-            logging.error("Failed to update difference heatmap.")
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
@@ -722,6 +623,7 @@ def main():
     window.show()
     #logging.debug("Application window displayed.")
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

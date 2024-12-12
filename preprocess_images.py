@@ -806,34 +806,9 @@ def save_shift(shift, path):
 
 def read_image(path_to_image):
     image = io.imread(path_to_image)
-    print(f"{path_to_image} Data Type: {image.dtype}")
+    #print(f"{path_to_image} Data Type: {image.dtype}")
     return image
 
-    # Load LR image and QM mask
-    '''
-    
-    lr_path = os.path.join(base_dir, lr_file)
-    qm_path = os.path.join(base_dir, qm_file)
-
-    lr = io.imread(lr_path).astype(np.float32)
-    qm = io.imread(qm_path)
-    qm_score = np.sum(qm)
-    print(
-        f"qm_score = {qm_score}, percent = {100 * qm_score / qm.shape[0] / qm.shape[1]}, min/max qm = {np.min(qm), np.max(qm)}")
-
-    # Interpret QM mask
-    if qm.dtype == bool:
-        qm_binary = qm
-    elif qm.dtype == np.uint8:
-        if np.array_equal(np.unique(qm), [0, 255]):
-            qm_binary = qm == 255
-        elif np.array_equal(np.unique(qm), [0, 1]):
-            qm_binary = qm.astype(bool)
-        else:
-            qm_binary = (qm > (qm.max() / 2)).astype(bool)
-    else:
-        qm_binary = qm.astype(bool)
-    '''
 
 # Main Preprocessing Function
 def preprocess_imgset(base_dir, feature_extractor, device):
