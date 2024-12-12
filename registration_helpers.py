@@ -3,6 +3,9 @@ import numpy as np
 import json
 import logging
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Configuration loading function
 DEFAULT_CONFIG = {
     "reference_image": "",

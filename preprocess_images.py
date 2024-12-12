@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage import io, transform
@@ -18,14 +12,11 @@ import os
 import random
 import json
 import time
-
-
-# In[2]:
-
-'''
 import torch
 import torchvision.models as models
 from torchvision.models import VGG19_Weights
+
+
 # Define the VGGFeatureExtractor with updated weights parameter
 class VGGFeatureExtractor(torch.nn.Module):
     def __init__(self, layers=['0', '5', '10', '19', '28']):
@@ -42,13 +33,17 @@ class VGGFeatureExtractor(torch.nn.Module):
                 outputs[name] = x
         return outputs
 
-# Initialize the feature extractor
-feature_extractor = VGGFeatureExtractor(layers=['0', '5', '10', '19', '28']).to('cuda' if torch.cuda.is_available() else 'cpu')
-feature_extractor.eval()
-# Disable gradient computations
-for param in feature_extractor.parameters():
-    param.requires_grad = False
-'''
+
+def init_VGG_for_perceptual_loss():
+    # Initialize the feature extractor
+    feature_extractor = VGGFeatureExtractor(layers=['0', '5', '10', '19', '28']).to('cuda' if torch.cuda.is_available() else 'cpu')
+    feature_extractor.eval()
+    # Disable gradient computations
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+
+    return feature_extractor
+
 
 
 def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False):
@@ -249,6 +244,31 @@ def min_max_scale(image):
     max_val = np.max(image)
     scaled_image = (image - min_val) / (max_val - min_val + 1e-8)  # Avoid division by zero
     return scaled_image
+
+
+# Normalize image to zero mean and unit std_dev
+def normalize_masked_array(masked_array):
+    mean = np.mean(masked_array)
+    std = np.std(masked_array)
+    if std == 0:
+        raise ValueError("Standard deviation is zero. Cannot normalize an array with constant values.")
+    normalized_array = (masked_array - mean) / std
+    return normalized_array
+
+
+def compute_mse(image1, mask1, image2, mask2):
+    #only consider pixels that are valid in both images, so we "and" the masks
+    combined_mask = np.logical_and(mask1, mask2)
+    # Apply the combined mask to both images
+    masked_image1 = image1[combined_mask]
+    masked_image2 = image2[combined_mask]
+    # Normalize both masked images
+    normalized_image1 = normalize_masked_array(masked_image1)
+    normalized_image2 = normalize_masked_array(masked_image2)
+
+    mse = np.mean((normalized_image1 - normalized_image2) ** 2)
+    return mse
+
     
 def compute_combined_perceptual_mse_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False, alpha=0.5, beta=0.5):
     """
@@ -333,7 +353,6 @@ def process_image_for_display(image, p2=1, p98=99):
     return processed_image
 
 
-# In[33]:
 
 
 def visualize_alignment2(ref_image, aligned_image, ref_mask, aligned_mask, shift_vector, suffix=''):
@@ -412,7 +431,6 @@ def visualize_alignment2(ref_image, aligned_image, ref_mask, aligned_mask, shift
     plt.show()
 
 
-# In[35]:
 
 
 def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_mask=None, mov_mask=None):
@@ -784,6 +802,38 @@ def save_shift(shift, path):
     shift_python = [float(shift[0]), float(shift[1])]
     with open(path, 'w') as f:
         json.dump({'delta_y': shift_python[0], 'delta_x': shift_python[1]}, f)
+
+
+def read_image(path_to_image):
+    image = io.imread(path_to_image)
+    print(f"{path_to_image} Data Type: {image.dtype}")
+    return image
+
+    # Load LR image and QM mask
+    '''
+    
+    lr_path = os.path.join(base_dir, lr_file)
+    qm_path = os.path.join(base_dir, qm_file)
+
+    lr = io.imread(lr_path).astype(np.float32)
+    qm = io.imread(qm_path)
+    qm_score = np.sum(qm)
+    print(
+        f"qm_score = {qm_score}, percent = {100 * qm_score / qm.shape[0] / qm.shape[1]}, min/max qm = {np.min(qm), np.max(qm)}")
+
+    # Interpret QM mask
+    if qm.dtype == bool:
+        qm_binary = qm
+    elif qm.dtype == np.uint8:
+        if np.array_equal(np.unique(qm), [0, 255]):
+            qm_binary = qm == 255
+        elif np.array_equal(np.unique(qm), [0, 1]):
+            qm_binary = qm.astype(bool)
+        else:
+            qm_binary = (qm > (qm.max() / 2)).astype(bool)
+    else:
+        qm_binary = qm.astype(bool)
+    '''
 
 # Main Preprocessing Function
 def preprocess_imgset(base_dir, feature_extractor, device):
