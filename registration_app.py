@@ -1,4 +1,4 @@
-# registration_app.py 
+# registration_app.py
 
 import sys
 import logging
@@ -13,12 +13,13 @@ import registration_helpers as rh
 import preprocess_images as ppi
 from heatmap_canvas import HeatmapCanvas
 
-# Configure logging
+# Corrected logging configuration to suppress DEBUG messages
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Suppress excessive matplotlib font manager logs
 logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
-
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
@@ -29,7 +30,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ----- Load Configuration -----
         self.config = rh.load_config()
-        #logging.debug("Configuration loaded.")
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -51,10 +51,10 @@ class MainWindow(QtWidgets.QMainWindow):
         load_template_mask_action.triggered.connect(lambda: self.load_image("template_mask"))
         file_menu.addAction(load_template_mask_action)
 
-        # ----- Central Widget and Layout -----
+        # ----- Central Widget and Grid Layout -----
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        grid_layout = QtWidgets.QGridLayout(central_widget)
 
         # ----- Controls for current deltaX, deltaY -----
         current_shift_layout = QtWidgets.QHBoxLayout()
@@ -77,7 +77,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_shift_layout.addWidget(QtWidgets.QLabel("Current ΔY:"))
         current_shift_layout.addWidget(self.deltaY_edit)
 
-        main_layout.addLayout(current_shift_layout)
+        # Add current shift layout to grid
+        grid_layout.addLayout(current_shift_layout, 0, 0, 1, 2)  # Span across 2 columns
 
         # ----- Controls for shift steps -----
         shift_step_layout = QtWidgets.QHBoxLayout()
@@ -96,40 +97,32 @@ class MainWindow(QtWidgets.QMainWindow):
         shift_step_layout.addWidget(QtWidgets.QLabel("Shift Step Y:"))
         shift_step_layout.addWidget(self.shift_step_y_edit)
 
-        main_layout.addLayout(shift_step_layout)
+        # Add shift step layout to grid
+        grid_layout.addLayout(shift_step_layout, 1, 0, 1, 2)  # Span across 2 columns
 
         # ----- Image Display Layout -----
         images_layout = QtWidgets.QHBoxLayout()
-
-        # Create a splitter for the overlay image and heatmap
-        splitter = QtWidgets.QSplitter(Qt.Horizontal)
 
         # Placeholder for reference+template overlay image
         self.overlay_image_label = QtWidgets.QLabel("Overlay Image Here")
         self.overlay_image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.overlay_image_label.setStyleSheet("border: 1px solid gray;")
-        self.overlay_image_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)  # Allow expansion
-        self.overlay_image_label.setMinimumSize(200, 200)  # Ensure visibility
-        splitter.addWidget(self.overlay_image_label)
+        self.overlay_image_label.setScaledContents(True)  # Ensure the image scales within the label
+        images_layout.addWidget(self.overlay_image_label)
 
         # HeatmapCanvas for the difference heatmap
         self.heatmap_canvas = HeatmapCanvas(self, width=5, height=4, dpi=100)
         self.heatmap_canvas.setStyleSheet("border: 1px solid gray;")
-        self.heatmap_canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        splitter.addWidget(self.heatmap_canvas)
+        images_layout.addWidget(self.heatmap_canvas)
 
-        # Optionally, set initial sizes
-        splitter.setSizes([400, 600])  # Adjust as needed based on your window size
-
-        images_layout.addWidget(splitter)
-
-        main_layout.addLayout(images_layout)
+        # Add image display layout to grid
+        grid_layout.addLayout(images_layout, 2, 0, 1, 2)  # Span across 2 columns
 
         # ----- Graphs Layout -----
         graphs_layout = QtWidgets.QHBoxLayout()
 
         # Initialize MSE Plot
-        self.mse_fig = Figure(figsize=(4, 2))
+        self.mse_fig = Figure(figsize=(4, 3))
         self.mse_canvas = FigureCanvas(self.mse_fig)
         self.mse_ax = self.mse_fig.add_subplot(111)
         self.mse_ax.set_title("MSE over Shifts")
@@ -138,7 +131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         graphs_layout.addWidget(self.mse_canvas)
 
         # Initialize Perceptual Loss Plot
-        self.pl_fig = Figure(figsize=(4, 2))
+        self.pl_fig = Figure(figsize=(4, 3))
         self.pl_canvas = FigureCanvas(self.pl_fig)
         self.pl_ax = self.pl_fig.add_subplot(111)
         self.pl_ax.set_title("Perceptual Loss over Shifts")
@@ -146,7 +139,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_ylabel("Perceptual Loss")
         graphs_layout.addWidget(self.pl_canvas)
 
-        main_layout.addLayout(graphs_layout)
+        # Add graphs layout to grid
+        grid_layout.addLayout(graphs_layout, 3, 0, 1, 2)  # Span across 2 columns
+
+        # Set stretch factors for rows and columns
+        grid_layout.setRowStretch(0, 1)  # First row (shift controls)
+        grid_layout.setRowStretch(1, 1)  # Second row (shift steps)
+        grid_layout.setRowStretch(2, 3)  # Third row (image display)
+        grid_layout.setRowStretch(3, 2)  # Fourth row (graphs)
+
+        grid_layout.setColumnStretch(0, 1)  # Left column (overlay image + graphs)
+        grid_layout.setColumnStretch(1, 1)  # Right column (heatmap + graphs)
 
         # ----- Set Window Properties -----
         self.setWindowTitle("Interactive Image Alignment Tool")
@@ -185,6 +188,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.config["template_mask"]:
             self.load_image_from_path("template_mask", self.config["template_mask"])
 
+
     def initialize_plots(self):
         """
         Initialize the plots with empty data.
@@ -202,7 +206,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_ylabel("Perceptual Loss")
         self.pl_ax.plot([], [], 'b-')
         self.pl_canvas.draw()
-        #logging.debug("Initialized MSE and Perceptual Loss plots.")
+        # logging.debug("Initialized MSE and Perceptual Loss plots.")
 
     def load_image(self, image_type):
         """
@@ -224,7 +228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         # Use scikit-image to load images
         arr = ppi.read_image(filepath)
-        #logging.debug(f"{image_type} NumPy array shape: {arr.shape}, dtype: {arr.dtype}")
+        # logging.debug(f"{image_type} NumPy array shape: {arr.shape}, dtype: {arr.dtype}")
 
         # Assign to the correct attribute based on image type
         if image_type == "reference_image":
@@ -249,7 +253,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.warning(f"Unknown image type: {image_type}")
             return
 
-        #logging.debug(f"Stored {image_type} data.")
+        # logging.debug(f"Stored {image_type} data.")
 
         # Check for dimension consistency
         if image_type in ["reference_image", "template_image"]:
@@ -269,7 +273,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     logging.error("Reference mask dimensions do not match Template mask dimensions.")
                     return
 
-        self.update_overlay(self.template_image_array)
+        # Update the overlay only if both reference and template images are loaded
+        if image_type in ["reference_image", "template_image"] and self.ref_image_array is not None and self.template_image_array is not None:
+            self.update_overlay(self.template_image_array)
 
     def array_to_qpixmap(self, array, is_grayscale):
         """
@@ -297,13 +303,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("QImage conversion resulted in a null image.")
 
             pixmap = QPixmap.fromImage(qimage)
-            #logging.debug("Converted NumPy array to QPixmap.")
-
-            # Optionally, scale the pixmap to fit the display label
-            scaled_pixmap = pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            #logging.debug("Scaled QPixmap to fit QLabel size.")
-
-            return scaled_pixmap
+            # Remove manual scaling
+            return pixmap
         except Exception as e:
             logging.error(f"Failed to convert array to QPixmap: {e}")
             QtWidgets.QMessageBox.critical(self, "Image Conversion Error", f"Failed to convert image for display: {e}")
@@ -319,7 +320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if self.ref_image_array is None or shifted_template_image is None:
             self.overlay_image_label.setText("Overlay Image Here")
-            #logging.debug("Overlay not updated: Reference or Shifted Template image array is None.")
+            # logging.debug("Overlay not updated: Reference or Shifted Template image array is None.")
             return
 
         # Apply contrast stretching to both arrays
@@ -332,7 +333,10 @@ class MainWindow(QtWidgets.QMainWindow):
         overlay_array[:, :, 1] = ref_enhanced           # Green channel (Reference Image)
         overlay_array[:, :, 2] = ref_enhanced           # Blue channel (Reference Image), creating cyan
 
-        #logging.debug("Created RGB overlay from enhanced reference and shifted template images.")
+        # Debugging: Verify the range of overlay channels
+        # print(f"Overlay Array - R: {overlay_array[:, :, 0].min()} to {overlay_array[:, :, 0].max()}")
+        # print(f"Overlay Array - G: {overlay_array[:, :, 1].min()} to {overlay_array[:, :, 1].max()}")
+        # print(f"Overlay Array - B: {overlay_array[:, :, 2].min()} to {overlay_array[:, :, 2].max()}")
 
         # Convert the overlay array to QImage
         bytes_per_line = 3 * overlay_array.shape[1]
@@ -346,13 +350,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Convert QImage to QPixmap
         overlay_pixmap = QPixmap.fromImage(overlay_qimage)
-        #logging.debug("Converted overlay NumPy array to QPixmap.")
-
-        # Scale the pixmap to fit the QLabel's size
-        scaled_pixmap = overlay_pixmap.scaled(self.overlay_image_label.size(), Qt.KeepAspectRatio,
-                                              Qt.SmoothTransformation)
-        self.overlay_image_label.setPixmap(scaled_pixmap)
-        #logging.debug("Set scaled overlay pixmap to QLabel.")
+        # Set the pixmap directly without manual scaling
+        self.overlay_image_label.setPixmap(overlay_pixmap)
+        # logging.debug("Set overlay pixmap to QLabel.")
 
     def resizeEvent(self, event):
         """
@@ -363,7 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_overlay(self.template_image_array)
         if self.heatmap_canvas:
             self.heatmap_canvas.draw()
-        #logging.debug("Handled window resize event and updated overlay.")
+        # logging.debug("Handled window resize event and updated overlay.")
 
     def keyPressEvent(self, event):
         """
@@ -373,7 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             shift_x = float(self.shift_step_x_edit.text()) if self.shift_step_x_edit.text() else 0.0
             shift_y = float(self.shift_step_y_edit.text()) if self.shift_step_y_edit.text() else 0.0
-            #logging.debug(f"Shift steps - X: {shift_x}, Y: {shift_y}")
+            # logging.debug(f"Shift steps - X: {shift_x}, Y: {shift_y}")
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Shift steps must be numeric.")
             logging.error("Non-numeric shift step entered.")
@@ -381,16 +381,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if key == Qt.Key_Up:
             self.config["current_deltay"] -= shift_y
-            #logging.debug(f"Pressed Up key. New Delta Y: {self.config['current_deltay']}")
+            # logging.debug(f"Pressed Up key. New Delta Y: {self.config['current_deltay']}")
         elif key == Qt.Key_Down:
             self.config["current_deltay"] += shift_y
-            #logging.debug(f"Pressed Down key. New Delta Y: {self.config['current_deltay']}")
+            # logging.debug(f"Pressed Down key. New Delta Y: {self.config['current_deltay']}")
         elif key == Qt.Key_Left:
             self.config["current_deltax"] -= shift_x
-            #logging.debug(f"Pressed Left key. New Delta X: {self.config['current_deltax']}")
+            # logging.debug(f"Pressed Left key. New Delta X: {self.config['current_deltax']}")
         elif key == Qt.Key_Right:
             self.config["current_deltax"] += shift_x
-            #logging.debug(f"Pressed Right key. New Delta X: {self.config['current_deltax']}")
+            # logging.debug(f"Pressed Right key. New Delta X: {self.config['current_deltax']}")
         else:
             super(MainWindow, self).keyPressEvent(event)
             return
@@ -398,7 +398,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update the shift fields
         self.deltaX_edit.setText(str(self.config["current_deltax"]))
         self.deltaY_edit.setText(str(self.config["current_deltay"]))
-        #logging.debug("Updated Delta X and Delta Y QLineEdits.")
+        # logging.debug("Updated Delta X and Delta Y QLineEdits.")
 
         # Apply the shift to the template image and update the overlay
         self.apply_shift_and_update_overlay()
@@ -408,7 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Handle the close event to ensure proper cleanup.
         """
         try:
-            #logging.debug("Closing MainWindow and performing cleanup.")
+            # logging.debug("Closing MainWindow and performing cleanup.")
             pass  # Perform any additional cleanup here if necessary
         except Exception as e:
             logging.error(f"Error during cleanup: {e}")
@@ -423,7 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             new_shift_x = float(text)
             self.config["current_deltax"] = new_shift_x
-            #logging.debug(f"Set current_deltax to {new_shift_x} from user input.")
+            # logging.debug(f"Set current_deltax to {new_shift_x} from user input.")
             self.apply_shift_and_update_overlay()
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Current Delta X must be a numeric value.")
@@ -439,7 +439,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             new_shift_y = float(text)
             self.config["current_deltay"] = new_shift_y
-            #logging.debug(f"Set current_deltay to {new_shift_y} from user input.")
+            # logging.debug(f"Set current_deltay to {new_shift_y} from user input.")
             self.apply_shift_and_update_overlay()
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Current Delta Y must be a numeric value.")
@@ -477,7 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         total_shift_x = self.config["current_deltax"]
         total_shift_y = self.config["current_deltay"]
 
-        #logging.debug(f"Applying total shift: Delta X={total_shift_x}, Delta Y={total_shift_y}")
+        # logging.debug(f"Applying total shift: Delta X={total_shift_x}, Delta Y={total_shift_y}")
 
         # Apply shift to the template image
         shifted_image = ndi_shift(
@@ -487,7 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
             order=3  # Cubic interpolation for images
         )
         shifted_image.flags.writeable = False
-        #logging.debug("Applied shift to template image using scipy.ndimage.shift.")
+        # logging.debug("Applied shift to template image using scipy.ndimage.shift.")
 
         # Apply shift to the template mask
         shifted_mask = ndi_shift(
@@ -498,34 +498,34 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
         shifted_mask.flags.writeable = False
-        #logging.debug("Applied shift to template mask and re-binarized.")
+        # logging.debug("Applied shift to template mask and re-binarized.")
 
         # Update the display pixmap with the shifted image
         shifted_display_arr = rh.contrast_stretch(shifted_image)  # Apply contrast stretching for display
         self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
-        #logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
+        # logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
 
         # Update the overlay
         self.update_overlay(shifted_image)
-        #logging.debug("Updated overlay after shifting.")
+        # logging.debug("Updated overlay after shifting.")
 
         # Compute Losses
         mse = self.compute_mse(shifted_image, shifted_mask)
         pl = self.compute_perceptual_loss(shifted_image, shifted_mask)
-        #logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
+        # logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
 
         # Append to loss history
         self.mse_history.append(mse)
         self.pl_history.append(pl)
-        #logging.debug("Appended MSE and Perceptual Loss to histories.")
+        # logging.debug("Appended MSE and Perceptual Loss to histories.")
 
         # Update plots
         self.update_plots(self.mse_history, self.pl_history)
-        #logging.debug("Updated MSE and Perceptual Loss plots.")
+        # logging.debug("Updated MSE and Perceptual Loss plots.")
 
         # Update difference heatmap
         self.compute_and_display_heatmap(shifted_image, shifted_mask)
-        #logging.debug("Computed and displayed difference heatmap.")
+        # logging.debug("Computed and displayed difference heatmap.")
 
     def compute_mse(self, shifted_template, shifted_template_mask):
         """
@@ -548,7 +548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Update the plots with new MSE and perceptual loss values.
         """
         shift_steps = range(len(mse_values))
-        #logging.debug(f"Updating plots with {len(mse_values)} data points.")
+        # logging.debug(f"Updating plots with {len(mse_values)} data points.")
 
         # Update MSE Plot
         self.mse_ax.clear()
@@ -557,7 +557,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mse_ax.set_ylabel("MSE")
         self.mse_ax.plot(shift_steps, mse_values, 'r-')
         self.mse_canvas.draw()
-        #logging.debug("Updated MSE plot.")
+        # logging.debug("Updated MSE plot.")
 
         # Update Perceptual Loss Plot
         self.pl_ax.clear()
@@ -566,7 +566,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_ylabel("Perceptual Loss")
         self.pl_ax.plot(shift_steps, pl_values, 'b-')
         self.pl_canvas.draw()
-        #logging.debug("Updated Perceptual Loss plot.")
+        # logging.debug("Updated Perceptual Loss plot.")
 
     def compute_and_display_heatmap(self, shifted_template_image, shifted_template_mask):
         """
@@ -604,7 +604,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.warning("No overlapping valid pixels found between the two masks.")
             return
 
-        #logging.debug(f"Combined mask has {np.sum(combined_mask)} valid pixels.")
+        # logging.debug(f"Combined mask has {np.sum(combined_mask)} valid pixels.")
 
         # Normalize the reference image
         mean_ref = np.mean(self.ref_image_array[combined_mask])
@@ -624,14 +624,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # Plot the heatmap using the updated HeatmapCanvas
         self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 
-        #logging.debug("Displayed difference heatmap using matplotlib's imshow.")
+        # logging.debug("Displayed difference heatmap using matplotlib's imshow.")
+
+
+    def save_heatmap(self):
+        """
+        Save the current heatmap as an image file.
+        """
+        # Since the user doesn't need this feature, this method can be removed.
+        pass
 
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    #logging.debug("Application window displayed.")
+    # logging.debug("Application window displayed.")
     sys.exit(app.exec_())
 
 
