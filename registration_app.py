@@ -1,3 +1,5 @@
+# registration_app.py 
+
 import sys
 import logging
 from PyQt5 import QtWidgets, QtGui, QtCore
@@ -12,7 +14,7 @@ import preprocess_images as ppi
 from heatmap_canvas import HeatmapCanvas
 
 # Configure logging
-logging.basicConfig(level=logging.debug, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Suppress excessive matplotlib font manager logs
 logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
@@ -99,16 +101,27 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Image Display Layout -----
         images_layout = QtWidgets.QHBoxLayout()
 
+        # Create a splitter for the overlay image and heatmap
+        splitter = QtWidgets.QSplitter(Qt.Horizontal)
+
         # Placeholder for reference+template overlay image
         self.overlay_image_label = QtWidgets.QLabel("Overlay Image Here")
         self.overlay_image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.overlay_image_label.setStyleSheet("border: 1px solid gray;")
-        images_layout.addWidget(self.overlay_image_label)
+        self.overlay_image_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)  # Allow expansion
+        self.overlay_image_label.setMinimumSize(200, 200)  # Ensure visibility
+        splitter.addWidget(self.overlay_image_label)
 
         # HeatmapCanvas for the difference heatmap
         self.heatmap_canvas = HeatmapCanvas(self, width=5, height=4, dpi=100)
         self.heatmap_canvas.setStyleSheet("border: 1px solid gray;")
-        images_layout.addWidget(self.heatmap_canvas)
+        self.heatmap_canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        splitter.addWidget(self.heatmap_canvas)
+
+        # Optionally, set initial sizes
+        splitter.setSizes([400, 600])  # Adjust as needed based on your window size
+
+        images_layout.addWidget(splitter)
 
         main_layout.addLayout(images_layout)
 
@@ -315,9 +328,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create a 3-channel RGB overlay using the enhanced arrays
         overlay_array = np.zeros((self.ref_image_array.shape[0], self.ref_image_array.shape[1], 3), dtype=np.uint8)
-        overlay_array[:, :, 0] = ref_enhanced  # Red channel (Template Image)
-        overlay_array[:, :, 1] = template_enhanced  # Green channel (Reference Image)
-        overlay_array[:, :, 2] = template_enhanced  # Blue channel remains zero
+        overlay_array[:, :, 0] = template_enhanced       # Red channel (Template Image)
+        overlay_array[:, :, 1] = ref_enhanced           # Green channel (Reference Image)
+        overlay_array[:, :, 2] = ref_enhanced           # Blue channel (Reference Image), creating cyan
 
         #logging.debug("Created RGB overlay from enhanced reference and shifted template images.")
 
@@ -395,8 +408,8 @@ class MainWindow(QtWidgets.QMainWindow):
         Handle the close event to ensure proper cleanup.
         """
         try:
-            logging.debug("Closing MainWindow and performing cleanup.")
-            # Perform any additional cleanup here if necessary
+            #logging.debug("Closing MainWindow and performing cleanup.")
+            pass  # Perform any additional cleanup here if necessary
         except Exception as e:
             logging.error(f"Error during cleanup: {e}")
         finally:

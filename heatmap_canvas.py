@@ -45,9 +45,10 @@ class HeatmapCanvas(FigureCanvas):
             if self.colorbar is not None:
                 try:
                     self.colorbar.remove()
-                    logging.debug("Removed existing colorbar.")
+                    #logging.debug("Removed existing colorbar.")
                 except AttributeError:
-                    logging.warning("Colorbar already removed or was never set.")
+                    #logging.warning("Colorbar already removed or was never set.")
+                    pass
                 except Exception as e:
                     logging.error(f"Failed to remove existing colorbar: {e}")
                 finally:
@@ -58,7 +59,7 @@ class HeatmapCanvas(FigureCanvas):
             cax = divider.append_axes("right", size="5%", pad=0.05)
 
             self.colorbar = self.fig.colorbar(im, cax=cax, orientation='vertical')
-            logging.debug("Added new colorbar.")
+            #logging.debug("Added new colorbar.")
 
             self.draw()
         except Exception as e:
