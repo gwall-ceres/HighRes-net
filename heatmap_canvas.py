@@ -35,14 +35,19 @@ class HeatmapCanvas(FigureCanvas):
                 # Apply mask by masking invalid data
                 data = np.ma.masked_where(~mask, data)
 
-            im = self.axes.imshow(data, cmap=cmap)
+            im = self.axes.imshow(data, cmap=cmap, interpolation='nearest', aspect='auto')
             self.axes.axis('off')  # Hide axes for a cleaner look
+
+            # Set the color for masked areas to black
+            im.cmap.set_bad(color='black')
 
             # Remove existing colorbar if it exists and is valid
             if self.colorbar is not None:
                 try:
                     self.colorbar.remove()
-                    #logging.debug("Removed existing colorbar.")
+                    logging.debug("Removed existing colorbar.")
+                except AttributeError:
+                    logging.warning("Colorbar already removed or was never set.")
                 except Exception as e:
                     logging.error(f"Failed to remove existing colorbar: {e}")
                 finally:
@@ -53,7 +58,7 @@ class HeatmapCanvas(FigureCanvas):
             cax = divider.append_axes("right", size="5%", pad=0.05)
 
             self.colorbar = self.fig.colorbar(im, cax=cax, orientation='vertical')
-            #logging.debug("Added new colorbar.")
+            logging.debug("Added new colorbar.")
 
             self.draw()
         except Exception as e:

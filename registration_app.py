@@ -1,13 +1,10 @@
 import sys
-import os
-import json
 import logging
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap  # Directly import QPixmap
 import numpy as np
 from scipy.ndimage import shift as ndi_shift
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import registration_helpers as rh
@@ -318,9 +315,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create a 3-channel RGB overlay using the enhanced arrays
         overlay_array = np.zeros((self.ref_image_array.shape[0], self.ref_image_array.shape[1], 3), dtype=np.uint8)
-        overlay_array[:, :, 0] = template_enhanced  # Red channel (Template Image)
-        overlay_array[:, :, 1] = ref_enhanced  # Green channel (Reference Image)
-        overlay_array[:, :, 2] = 0  # Blue channel remains zero
+        overlay_array[:, :, 0] = ref_enhanced  # Red channel (Template Image)
+        overlay_array[:, :, 1] = template_enhanced  # Green channel (Reference Image)
+        overlay_array[:, :, 2] = template_enhanced  # Blue channel remains zero
 
         #logging.debug("Created RGB overlay from enhanced reference and shifted template images.")
 
