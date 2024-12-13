@@ -234,12 +234,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_type == "reference_image":
             self.ref_image_array = arr.astype(np.float32)  # Store original
             self.ref_image_array.flags.writeable = False
-            display_arr = rh.contrast_stretch(self.ref_image_array)  # Apply contrast stretching for display
+            display_arr = ppi.contrast_stretch_8bit(self.ref_image_array)  # Apply contrast stretching for display
             self.ref_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
         elif image_type == "template_image":
             self.template_image_array = arr.astype(np.float32)  # Store original
             self.template_image_array.flags.writeable = False
-            display_arr = rh.contrast_stretch(self.template_image_array)  # Apply contrast stretching for display
+            display_arr = ppi.contrast_stretch_8bit(self.template_image_array)  # Apply contrast stretching for display
             self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
         elif image_type == "reference_mask":
             self.ref_mask_array = arr.astype(bool)  # Store original mask without contrast stretching
@@ -324,8 +324,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Apply contrast stretching to both arrays
-        ref_enhanced = rh.contrast_stretch(self.ref_image_array)
-        template_enhanced = rh.contrast_stretch(shifted_template_image)
+        ref_enhanced = ppi.contrast_stretch_8bit(self.ref_image_array)
+        template_enhanced = ppi.contrast_stretch_8bit(shifted_template_image)
 
         # Create a 3-channel RGB overlay using the enhanced arrays
         overlay_array = np.zeros((self.ref_image_array.shape[0], self.ref_image_array.shape[1], 3), dtype=np.uint8)
@@ -501,7 +501,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # logging.debug("Applied shift to template mask and re-binarized.")
 
         # Update the display pixmap with the shifted image
-        shifted_display_arr = rh.contrast_stretch(shifted_image)  # Apply contrast stretching for display
+        shifted_display_arr = ppi.contrast_stretch_8bit(shifted_image)  # Apply contrast stretching for display
         self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
         # logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
 
@@ -540,7 +540,14 @@ class MainWindow(QtWidgets.QMainWindow):
         Placeholder function. Replace with actual implementation.
         """
         # Placeholder: using MSE as a stand-in
-        pl = self.compute_mse(shifted_template, shifted_template_mask)
+        #pl = self.compute_mse(shifted_template, shifted_template_mask)
+        pl = ppi.compute_perceptual_loss(self.perceptual_loss_model,
+                                         self.ref_image_array,
+                                         shifted_template,
+                                         self.ref_mask_array,
+                                         shifted_template_mask,
+                                         self.perceptual_loss_model.hardware,
+                                         False)
         return pl
 
     def update_plots(self, mse_values, pl_values):
@@ -617,14 +624,18 @@ class MainWindow(QtWidgets.QMainWindow):
         std_template = np.std(shifted_template_image[combined_mask])
         normed_template = np.zeros_like(shifted_template_image, dtype=float)
         normed_template[combined_mask] = (shifted_template_image[combined_mask] - mean_template) / std_template
-
         # Compute absolute difference
         diff_array = np.abs(normed_ref - normed_template)
-
         # Plot the heatmap using the updated HeatmapCanvas
         self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 
-        # logging.debug("Displayed difference heatmap using matplotlib's imshow.")
+        '''
+        ref_masked = self.ref_image_array * (self.ref_mask_array.astype(np.float32) * 0.5 + 0.5)
+        mov_masked = shifted_template_image * (shifted_template_mask.astype(np.float32) * 0.5 + 0.5)
+        diff_array = np.abs(ref_masked - mov_masked)
+        # Plot the heatmap using the updated HeatmapCanvas
+        self.heatmap_canvas.plot_heatmap(diff_array, mask=None, cmap='jet')
+        '''
 
 
     def save_heatmap(self):

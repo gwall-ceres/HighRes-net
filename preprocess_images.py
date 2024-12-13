@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage import io, transform
+from skimage.metrics import structural_similarity as ssim
 from skimage.registration import phase_cross_correlation
 from skimage import exposure
 from scipy.ndimage import shift as ndi_shift
@@ -24,6 +25,12 @@ class VGGFeatureExtractor(torch.nn.Module):
         # Use the updated 'weights' parameter instead of 'pretrained'
         self.vgg = models.vgg19(weights=VGG19_Weights.DEFAULT).features[:int(layers[-1])+1]
         self.layers = layers
+
+        if torch.cuda.is_available():
+            self.hardware = 'cuda'
+            print("VGG using CUDA")
+        else:
+            self.hardware = 'cpu'
 
     def forward(self, x):
         outputs = {}
@@ -210,13 +217,14 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         plt.show()
     torch.cuda.synchronize()
     end = time.time()
-    print(f"***total time to compute the perceptual loss = {end - start}***")
+    #print(f"***total time to compute the perceptual loss = {end - start}***")
     return total_loss
 
 
-def contrast_stretch_8bit(array):
+def contrast_stretch_8bit(image):
     """
     Perform contrast stretching on a NumPy array to map its values to the 0-255 range.
+    """
     """
     # Convert to float to prevent overflow/underflow
     array = array.astype(float)
@@ -236,6 +244,15 @@ def contrast_stretch_8bit(array):
 
     # Clip values to the 0-255 range and convert to uint8
     stretched = np.clip(stretched, 0, 255).astype(np.uint8)
+    """
+    p1 = np.percentile(image, 1)  # 1st percentile (lower tail)
+    p99 = np.percentile(image, 99)  # 99th percentile (upper tail)
+
+    stretched = exposure.rescale_intensity(
+        image,
+        in_range=(p1, p99),
+        out_range=(0, 255)
+    ).astype(np.uint8)
 
     return stretched
 
@@ -248,73 +265,110 @@ def min_max_scale(image):
 
 # Normalize image to zero mean and unit std_dev
 def normalize_masked_array(masked_array):
+    epsilon = 1e-8
     mean = np.mean(masked_array)
     std = np.std(masked_array)
     if std == 0:
         raise ValueError("Standard deviation is zero. Cannot normalize an array with constant values.")
-    normalized_array = (masked_array - mean) / std
+    normalized_array = (masked_array - mean) / (std + epsilon)
     return normalized_array
 
 
-def compute_mse(image1, mask1, image2, mask2):
+def compute_mse(image1, mask1, image2, mask2, use_masks=True, normalize=True):
     #only consider pixels that are valid in both images, so we "and" the masks
-    combined_mask = np.logical_and(mask1, mask2)
-    # Apply the combined mask to both images
-    masked_image1 = image1[combined_mask]
-    masked_image2 = image2[combined_mask]
+
+    if use_masks:
+        combined_mask = np.logical_and(mask1, mask2)
+        # Apply the combined mask to both images
+        masked_image1 = image1[combined_mask]
+        masked_image2 = image2[combined_mask]
+    else:
+        masked_image1 = image1
+        masked_image2 = image2
+
     # Normalize both masked images
-    normalized_image1 = normalize_masked_array(masked_image1)
-    normalized_image2 = normalize_masked_array(masked_image2)
+    if normalize:
+        normalized_image1 = normalize_masked_array(masked_image1)
+        normalized_image2 = normalize_masked_array(masked_image2)
+        return np.mean((normalized_image1 - normalized_image2) ** 2)
+    else:
+        return np.mean((masked_image1 - masked_image2) ** 2)
 
-    mse = np.mean((normalized_image1 - normalized_image2) ** 2)
-    return mse
 
-    
-def compute_combined_perceptual_mse_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False, alpha=0.5, beta=0.5):
+def compute_ssim(image1, mask1, image2, mask2, use_masks=True, normalize=True):
     """
-    Compute a combined perceptual and MSE loss between two images given their masks.
-    
+    Compute the Structural Similarity Index Measure (SSIM) between two images,
+    optionally considering only the overlapping valid regions defined by masks.
+
     Parameters:
-        model: Pretrained feature extractor model.
-        ref_image: NumPy array, reference image.
-        mov_image: NumPy array, moving image to align.
-        ref_mask: NumPy boolean array, mask for reference image.
-        mov_mask: NumPy boolean array, mask for moving image.
-        device: Computation device.
-        debug: Boolean, if True, visualize activations and masks.
-        alpha: Weight for perceptual loss.
-        beta: Weight for MSE loss.
-    
+    - image1 (np.ndarray): First image array, shape (H, W) or (H, W, C).
+    - mask1 (np.ndarray): Boolean mask for the first image, shape (H, W).
+    - image2 (np.ndarray): Second image array, shape (H, W) or (H, W, C).
+    - mask2 (np.ndarray): Boolean mask for the second image, shape (H, W).
+    - use_masks (bool): If True, only consider pixels where both masks are True.
+    - normalize (bool): If True, normalize the masked images before computing SSIM.
+
     Returns:
-        combined_loss: Weighted sum of perceptual and MSE losses.
+    - ssim_value (float): The computed SSIM.
+
+    Raises:
+    - ValueError: If there are no overlapping valid pixels when `use_masks` is True.
+    - ValueError: If input images and masks have incompatible shapes.
     """
-    # Compute Perceptual Loss
-    perceptual_loss = compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device, debug)
-    
-    # Normalize images for MSE computation
-    ref_normalized = min_max_scale(ref_image)
-    mov_normalized = min_max_scale(mov_image)
-    
-    # Convert to tensors
-    ref_tensor = torch.from_numpy(ref_normalized).float().to(device)
-    mov_tensor = torch.from_numpy(mov_normalized).float().to(device)
-    
-    # Apply combined mask
-    combined_mask = ref_mask & mov_mask
-    combined_mask_tensor = torch.from_numpy(combined_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-    
-    # Mask the tensors
-    ref_tensor_masked = ref_tensor * combined_mask_tensor
-    mov_tensor_masked = mov_tensor * combined_mask_tensor
-    
-    # Compute MSE Loss
-    mse_loss = F.mse_loss(ref_tensor_masked, mov_tensor_masked, reduction='mean')
-    
-    # Compute Combined Loss
-    combined_loss = alpha * perceptual_loss + beta * mse_loss
-    print(f"combined_loss {alpha * perceptual_loss} + {beta * mse_loss}")
-    
-    return combined_loss
+    # Ensure both images have the same spatial dimensions
+    if image1.shape[:2] != image2.shape[:2]:
+        raise ValueError("Reference and moving images must have the same height and width.")
+    if mask1.shape != mask2.shape:
+        raise ValueError("Reference and moving masks must have the same height and width.")
+
+    # Combine masks to focus on overlapping valid regions
+    if use_masks:
+        combined_mask = np.logical_and(mask1, mask2)  # Shape: (H, W)
+        if not np.any(combined_mask):
+            raise ValueError("No overlapping valid pixels found between the masks.")
+        # Apply the combined mask to both images
+        masked_image1 = image1.copy()
+        masked_image2 = image2.copy()
+        masked_image1[~combined_mask] = 0
+        masked_image2[~combined_mask] = 0
+    else:
+        masked_image1 = image1
+        masked_image2 = image2
+
+    # Normalize images if required
+    if normalize:
+        masked_image1 = normalize_masked_array(masked_image1)
+        masked_image2 = normalize_masked_array(masked_image2)
+
+    # Determine the data range
+    # Option A: If images are known to be in [0, 1]
+    # data_range = 1.0
+
+    # Option B: If images are in [0, 255]
+    # data_range = 255.0
+
+    # Option C: Compute based on image data
+    # Choose one based on your data
+
+    # Here, we choose Option C to make the function flexible
+    data_min = min(masked_image1.min(), masked_image2.min())
+    data_max = max(masked_image1.max(), masked_image2.max())
+    data_range = data_max - data_min
+
+    if data_range <= 0:
+        raise ValueError("Data range must be positive.")
+
+    # Handle grayscale and multichannel images
+    if masked_image1.ndim == 2:
+        # Grayscale images
+        ssim_value = ssim(masked_image1, masked_image2, data_range=data_range)
+    elif masked_image1.ndim == 3 and masked_image1.shape[2] in [1, 3, 4]:
+        # Multichannel images (e.g., RGB)
+        ssim_value = ssim(masked_image1, masked_image2, data_range=data_range, multichannel=True)
+    else:
+        raise ValueError("Input images must have shape (H, W), (H, W, 1), (H, W, 3), or (H, W, 4)")
+
+    return ssim_value
 
 
 def process_image_for_display(image, p2=1, p98=99):
@@ -530,186 +584,124 @@ def iterative_align_refinement_with_perceptual_loss(
     original_moving_image,
     original_moving_mask,
     max_iterations=10,
-    convergence_threshold=0.01,
-    upsample_factor=100,
-    device='cpu',
-    shift_dampening=0.5,
+    shift_dampening=1.0,
     debug=False
 ):
-    """
-    Iteratively align original_moving_image to reference_image using phase_cross_correlation.
-    Applies accumulated shifts directly to the original image to preserve fidelity.
-    Computes and records perceptual loss at each step.
-    Optionally visualizes activations and masks for debugging.
-    
-    Parameters:
-    - model: An instance of VGGFeatureExtractor or similar, pre-trained CNN for feature extraction.
-    - ref_image: NumPy array, float32, shape (H, W) or (H, W, C), reference image.
-    - ref_mask: NumPy boolean array, shape (H, W), mask for reference image.
-    - original_moving_image: NumPy array, float32, shape (H, W) or (H, W, C), moving image to align.
-    - original_moving_mask: NumPy boolean array, shape (H, W), mask for moving image.
-    - max_iterations: int, maximum number of iterations.
-    - convergence_threshold: float, shift magnitude below which to stop.
-    - upsample_factor: int, for subpixel accuracy in phase_cross_correlation.
-    - device: 'cpu' or 'cuda', device for computations.
-    - shift_dampening: float between 0 and 1, fraction of shift to apply each iteration to prevent overshooting.
-    - debug: Boolean, if True, visualize activations and masks.
-    
-    Returns:
-    - aligned_image_final: NumPy array, float32, aligned moving image.
-    - aligned_mask_final: NumPy boolean array, aligned mask.
-    - total_shift: tuple, (shift_y, shift_x).
-    - shifts_history: list of tuples, [(shift_y1, shift_x1), ...].
-    - loss_history: list of floats, [loss1, loss2, ...].
-    - initial_moving_image: NumPy array, original moving image before alignment.
-    """
-    
     total_shift_y = 0.0
     total_shift_x = 0.0
-    shifts_history = []
-    loss_history = []
-    
-    initial_moving_image = original_moving_image.copy()
-    initial_moving_mask = original_moving_mask.copy()
-    
+    shifts_history = [(0.0, 0.0)]
+    pl_history = []
+    mse_history = []
+    ssim_history = []
+
     for iteration in range(max_iterations):
-        print(f"\n--- Iteration {iteration + 1} ---")
-        
-        # Apply the accumulated shift to the original moving image
-        shifted_image = ndi_shift(
-            original_moving_image,
-            shift=(total_shift_y, total_shift_x),
-            mode='reflect',
-            order=3
-        )
-        shifted_mask = ndi_shift(
-            original_moving_mask.astype(float),
-            shift=(total_shift_y, total_shift_x),
-            mode='reflect',
-            order=0
-        )
-        #shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
+        #print(f"\n--- Iteration {iteration} ---")
+
+        if iteration == 0:
+            shifted_image = original_moving_image
+            shifted_mask = original_moving_mask.astype(float)
+        else:
+            # Apply the accumulated shift to the original moving image
+            shifted_image = ndi_shift(
+                original_moving_image,
+                shift=(total_shift_y, total_shift_x),
+                mode='reflect',
+                order=3
+            )
+            shifted_mask = ndi_shift(
+                original_moving_mask.astype(float),
+                shift=(total_shift_y, total_shift_x),
+                mode='constant',
+                order=3
+            )
+        shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
 
         # Compute perceptual loss between reference and shifted moving image
-        loss = compute_combined_perceptual_mse_loss(
-            model=model,
-            ref_image=ref_image,
-            mov_image=shifted_image,
-            ref_mask=ref_mask,
-            mov_mask=shifted_mask>0.5,
-            device=device,
-            debug=False#debug and iteration == 0  # Only visualize in the first iteration
-        )
-        loss_history.append(loss)
-        
-        print(f"Iteration {iteration + 1}: Perceptual Loss = {loss:.6f}")
+        perceptual_loss = compute_perceptual_loss(model, ref_image, shifted_image, ref_mask, shifted_mask, model.hardware, False)
+        mse = compute_mse(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True, normalize=True)
+        ssim_score = compute_ssim(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True)
 
-        # Compute shift between reference and currently aligned moving image
-        
+        print(
+            f"Iteration {iteration}: Shift=({float(total_shift_y):.4f}, {float(total_shift_x):.4f}), Perceptual Loss={perceptual_loss:.6f}, MSE={mse:.6f}, SSIM={ssim_score:.8f}")
+        pl_history.append(perceptual_loss)
+        mse_history.append(mse)
+        ssim_history.append(ssim_score)
+
+        #i have different way of applying the mask to the image before computing the phase cross correlation
+        #for some corner cases where there are a lot of invalid pixels, fully blacking out the masked pixels 
+        #results in very wrong results. Weighting them by half seems like it is an ok compromise. Needs more testing though.
         ref_masked = ref_image * (ref_mask.astype(ref_image.dtype) * 0.5 + 0.5)
         mov_masked = shifted_image * (shifted_mask.astype(shifted_image.dtype) * 0.5 + 0.5)
-
+        #completely black out the masked pixels
         #ref_masked = ref_image * ref_mask.astype(ref_image.dtype)
         #mov_masked = shifted_image * shifted_mask.astype(shifted_image.dtype)
-
+        #do not mask the pixels at all
         #ref_masked = ref_image 
         #mov_masked = shifted_image
-        
-        shift_yx, error, diffphase = phase_cross_correlation(
-            ref_masked,
-            mov_masked,
-            upsample_factor=2**(iteration+3)
-        )
-        delta_y, delta_x = shift_yx
-        shifts_history.append((delta_y, delta_x))
-        
-        print(f"Iteration {iteration + 1}: Computed Shift = (y: {delta_y:.5f}, x: {delta_x:.5f})")
-        
-        # Apply shift dampening to prevent overshooting
-        dampened_shift_y = delta_y * shift_dampening
-        dampened_shift_x = delta_x * shift_dampening
-        
-        print(f"Iteration {iteration + 1}: Applied Shift = (y: {dampened_shift_y:.5f}, x: {dampened_shift_x:.5f})")
-        
-        # Accumulate shifts
-        total_shift_y += dampened_shift_y
-        total_shift_x += dampened_shift_x
-        
-        # Compute perceptual loss after applying the shift
-        shifted_image_new = ndi_shift(
-            original_moving_image,
-            shift=(total_shift_y, total_shift_x),
-            mode='reflect',
-            order=3
-        )
-        shifted_mask_new = ndi_shift(
-            original_moving_mask.astype(float),
-            shift=(total_shift_y, total_shift_x),
-            mode='reflect',
-            order=0
-        )
-        shifted_mask_new = shifted_mask_new > 0.5  # Re-binarize the mask
-        
-        loss_new = compute_combined_perceptual_mse_loss(
-            model=model,
-            ref_image=ref_image,
-            mov_image=shifted_image_new,
-            ref_mask=ref_mask,
-            mov_mask=shifted_mask_new,
-            device=device,
-            debug=False  # Disable visualization for subsequent iterations
-        )
-        loss_history.append(loss_new)
-        
-        print(f"Iteration {iteration + 1}: Updated Perceptual Loss = {loss_new:.6f}")
 
-        if False:
-            ref_image1 = process_image_for_display(ref_image)
-            aligned_image1 = process_image_for_display(shifted_image_new)
-        else:
-            ref_image1 = ref_image
-            aligned_image1 = shifted_image_new
-            
-        aligned_mask = shifted_mask_new  
-        
-        # Define the shift vector (replace with your actual shift values)
-        shift_vector = (total_shift_y, total_shift_x)  # e.g., (0.1234, -0.5678)
-        
-        # Visualize the alignment
-        #ref_ref_image1 = ref_image1 * (ref_mask.astype(ref_image.dtype) * 0.5 + 0.5)
-        #aligned_image1 = aligned_image1 * (shifted_mask_new.astype(shifted_image.dtype) * 0.5 + 0.5)
-        #visualize_alignment(ref_image1, aligned_image1, ref_mask, aligned_mask, shift_vector, suffix='000')
-        visualize_registration(ref_image1, initial_moving_image, aligned_image1, ref_mask=None, mov_mask=None)
-        
-        # Check for convergence based on shift magnitude
-        '''
-        if abs(dampened_shift_y) < convergence_threshold and abs(dampened_shift_x) < convergence_threshold:
-            print("Converged based on shift threshold.")
-            break
-        '''
-        
-    
-    # After iterations, apply the total accumulated shift to the original moving image
-    aligned_image_final = ndi_shift(
-        original_moving_image,
-        shift=(total_shift_y, total_shift_x),
-        mode='reflect',
-        order=3
-    )
-    aligned_mask_final = ndi_shift(
-        original_moving_mask.astype(float),
-        shift=(total_shift_y, total_shift_x),
-        mode='reflect',
-        order=0
-    )
-    aligned_mask_final = aligned_mask_final > 0.5  # Re-binarize the mask
-    
-    total_shift = (total_shift_y, total_shift_x)
-    
-    return aligned_image_final, aligned_mask_final, total_shift, shifts_history, loss_history, initial_moving_image
+        #don't bother estimating the shift on the final iterations of the loop because we won't use it
+        if iteration < max_iterations - 1:
+            #find the best alignment
+            shift_yx, error, diffphase = phase_cross_correlation(
+                ref_masked,
+                mov_masked,
+                upsample_factor=2**(iteration+2)
+            )
+            delta_y, delta_x = shift_yx
 
 
-# In[59]:
+            # Apply shift dampening to prevent overshooting
+            dampened_shift_y = delta_y * shift_dampening
+            dampened_shift_x = delta_x * shift_dampening
+
+            # Accumulate shifts
+            total_shift_y += dampened_shift_y
+            total_shift_x += dampened_shift_x
+            shifts_history.append((total_shift_y, total_shift_x))
+
+    return shifts_history, pl_history, mse_history, ssim_history
+
+
+# Define a function to create the 3x2 grid of plots
+def plot_metrics_vs_shifts(shift_x, shift_y, ssim, mse, pl):
+    """
+    Plot SSIM, MSE, and Perceptual Loss against Shift X and Shift Y in a 3x2 grid.
+
+    Parameters:
+    - shift_x (list or array): Horizontal shifts.
+    - shift_y (list or array): Vertical shifts.
+    - ssim (list or array): SSIM values.
+    - mse (list or array): MSE values.
+    - pl (list or array): Perceptual Loss values.
+    """
+    fig, axs = plt.subplots(3, 2, figsize=(14, 18))
+
+    # Metrics Names and Data
+    metrics = {
+        'SSIM': ssim,
+        'MSE': mse,
+        'Perceptual Loss': pl
+    }
+
+    # Iterate over metrics and create subplots
+    for idx, (metric_name, metric_values) in enumerate(metrics.items()):
+        # Plot vs Shift X
+        axs[idx, 0].plot(shift_x, metric_values, marker='o', linestyle='-', color='b')
+        axs[idx, 0].set_xlabel('Shift X (pixels)', fontsize=12)
+        axs[idx, 0].set_ylabel(metric_name, fontsize=12)
+        axs[idx, 0].set_title(f'{metric_name} vs. Shift X', fontsize=14)
+        axs[idx, 0].grid(True, linestyle='--', alpha=0.6)
+
+        # Plot vs Shift Y
+        axs[idx, 1].plot(shift_y, metric_values, marker='s', linestyle='--', color='r')
+        axs[idx, 1].set_xlabel('Shift Y (pixels)', fontsize=12)
+        axs[idx, 1].set_ylabel(metric_name, fontsize=12)
+        axs[idx, 1].set_title(f'{metric_name} vs. Shift Y', fontsize=14)
+        axs[idx, 1].grid(True, linestyle='--', alpha=0.6)
+
+    # Adjust layout
+    plt.tight_layout()
+    plt.show()
 
 
 # Helper Functions
@@ -810,8 +802,39 @@ def read_image(path_to_image):
     return image
 
 
+def plot_metrics_vs_shifts_highlight(shift_x, shift_y, ssim, mse, pl):
+    fig, axs = plt.subplots(3, 2, figsize=(14, 18))
+
+    metrics = {
+        'SSIM': ssim,
+        'MSE': mse,
+        'Perceptual Loss': pl
+    }
+
+    for idx, (metric_name, metric_values) in enumerate(metrics.items()):
+        # Plot vs Shift X
+        axs[idx, 0].plot(shift_x, metric_values, marker='o', linestyle='-', color='b', label=metric_name)
+        axs[idx, 0].scatter(shift_x[-1], metric_values[-1], color='k', zorder=5, label='Final Value')
+        axs[idx, 0].set_xlabel('Shift X (pixels)', fontsize=12)
+        axs[idx, 0].set_ylabel(metric_name, fontsize=12)
+        axs[idx, 0].set_title(f'{metric_name} vs. Shift X', fontsize=14)
+        axs[idx, 0].legend(fontsize=12)
+        axs[idx, 0].grid(True, linestyle='--', alpha=0.6)
+
+        # Plot vs Shift Y
+        axs[idx, 1].plot(shift_y, metric_values, marker='s', linestyle='--', color='r', label=metric_name)
+        axs[idx, 1].scatter(shift_y[-1], metric_values[-1], color='k', zorder=5, label='Final Value')
+        axs[idx, 1].set_xlabel('Shift Y (pixels)', fontsize=12)
+        axs[idx, 1].set_ylabel(metric_name, fontsize=12)
+        axs[idx, 1].set_title(f'{metric_name} vs. Shift Y', fontsize=14)
+        axs[idx, 1].legend(fontsize=12)
+        axs[idx, 1].grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    plt.show()
+
 # Main Preprocessing Function
-def preprocess_imgset(base_dir, feature_extractor, device):
+def preprocess_imgset(base_dir, feature_extractor):
     """
     Processes a single imgset directory: downscales HR image and mask,
     aligns LR images to the downscaled HR reference, and saves the results.
@@ -897,8 +920,8 @@ def preprocess_imgset(base_dir, feature_extractor, device):
         
         suffix = lr_suffix  # or qm_suffix, since they should be same
 
-        #if suffix != "009":
-        #    continue
+        if suffix != "009":
+            continue
         
         # Load LR image and QM mask
         lr_path = os.path.join(base_dir, lr_file)
@@ -924,20 +947,28 @@ def preprocess_imgset(base_dir, feature_extractor, device):
 
         #unmasked = np.ones(hr_downscaled.shape).astype(np.bool)
         # Align LR to the downscaled HR reference
-        aligned_image, aligned_mask, total_shift, shifts_history, loss_history, initial_moving_image = iterative_align_refinement_with_perceptual_loss(
+        shifts_history, loss_history, mse_history, ssim_history = iterative_align_refinement_with_perceptual_loss(
             model=feature_extractor,
             ref_image=hr_downscaled,
             ref_mask=sm_downscaled,
             original_moving_image=lr,
             original_moving_mask=qm_binary,
-            max_iterations=10,
-            convergence_threshold=0.01,
-            upsample_factor=100,
-            device=device,
+            max_iterations=14,
             shift_dampening=1.0,  # Apply only half of the computed shift each iteration
             debug=False  # Enable visualization
         )
-        
+        #throw out the zeroth item in the list
+        for a in [shifts_history, loss_history, mse_history, ssim_history]:
+            a.pop(0)
+
+
+        shift_y = [shift[0] for shift in shifts_history]
+        shift_x = [shift[1] for shift in shifts_history]
+
+        # Plotting functions
+        plot_metrics_vs_shifts(shift_x, shift_y, ssim_history, mse_history, loss_history)
+        plot_metrics_vs_shifts_highlight(shift_x, shift_y, ssim_history, mse_history, loss_history)
+
         # Define output paths with preserved suffixes
         aligned_image_filename = f'aligned_LR{suffix}.png'
         aligned_mask_filename = f'aligned_QM{suffix}.png'
@@ -948,17 +979,17 @@ def preprocess_imgset(base_dir, feature_extractor, device):
         shift_path = os.path.join(base_dir, shift_filename)
         
         # Save aligned images and masks
-        save_image(aligned_image, aligned_image_path, easy_display=False)
-        save_image(aligned_mask, aligned_mask_path, dtype=np.bool_)
+        #save_image(aligned_image, aligned_image_path, easy_display=False)
+        #save_image(aligned_mask, aligned_mask_path, dtype=np.bool_)
         
         # Save shift vectors
-        save_shift(total_shift, shift_path)
+        #save_shift(total_shift, shift_path)
         
         # Print the results for verification
         print(f"\nProcessed {lr_file} and {qm_file}:")
-        print(f"Final cumulative shift: (y: {total_shift[0]:.5f}, x: {total_shift[1]:.5f})")
-        print(f"Shift History: {shifts_history}")
-        print(f"Perceptual Loss History: {loss_history}")
+        #print(f"Final cumulative shift: (y: {total_shift[0]:.5f}, x: {total_shift[1]:.5f})")
+        #print(f"Shift History: {shifts_history}")
+        #print(f"Perceptual Loss History: {loss_history}")
 
 
 
