@@ -51,6 +51,16 @@ class MainWindow(QtWidgets.QMainWindow):
         load_template_mask_action.triggered.connect(lambda: self.load_image("template_mask"))
         file_menu.addAction(load_template_mask_action)
 
+        # New action for computing and applying the shift
+        #compute_shift_action = QtWidgets.QAction("Compute and Apply Shift", self)
+        #compute_shift_action.triggered.connect(self.compute_and_apply_shift)
+        #file_menu.addAction(compute_shift_action)
+
+        toolbar = self.addToolBar("Main Toolbar")
+        compute_shift_action = QtWidgets.QAction("Compute and Apply Shift", self)
+        compute_shift_action.triggered.connect(self.compute_and_apply_shift)
+        toolbar.addAction(compute_shift_action)
+
         # ----- Central Widget and Grid Layout -----
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -174,6 +184,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Initialize Loss Histories -----
         self.mse_history = []
         self.pl_history = []
+        self.shift_x_history = []
+        self.shift_y_history = []
 
         # ----- Initialize Plots -----
         self.initialize_plots()
@@ -447,6 +459,31 @@ class MainWindow(QtWidgets.QMainWindow):
             # Reset to previous valid value
             self.deltaY_edit.setText(str(self.config["current_deltay"]))
 
+
+    def apply_shift_to_template(self, total_shift_x, total_shift_y):
+         # Apply shift to the template image
+        shifted_image = ndi_shift(
+            self.template_image_array,
+            shift=(total_shift_y, total_shift_x),
+            mode='reflect',
+            order=3  # Cubic interpolation for images
+        )
+        shifted_image.flags.writeable = False
+        # logging.debug("Applied shift to template image using scipy.ndimage.shift.")
+
+        # Apply shift to the template mask
+        shifted_mask = ndi_shift(
+            self.template_mask_array.astype(float),
+            shift=(total_shift_y, total_shift_x),
+            mode='constant',
+            order=0  # Nearest-neighbor for masks
+        )
+        shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
+        shifted_mask.flags.writeable = False
+
+        return shifted_image, shifted_mask
+           
+
     def apply_shift_and_update_overlay(self):
         """
         Shift the template image and its mask based on current_deltax and current_deltay,
@@ -476,28 +513,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Total shifts
         total_shift_x = self.config["current_deltax"]
         total_shift_y = self.config["current_deltay"]
+        print(f"Total shift: X={total_shift_x}, Y={total_shift_y}")
+        self.shift_x_history.append(total_shift_x)
+        self.shift_y_history.append(total_shift_y)
 
         # logging.debug(f"Applying total shift: Delta X={total_shift_x}, Delta Y={total_shift_y}")
 
-        # Apply shift to the template image
-        shifted_image = ndi_shift(
-            self.template_image_array,
-            shift=(total_shift_y, total_shift_x),
-            mode='reflect',
-            order=3  # Cubic interpolation for images
-        )
-        shifted_image.flags.writeable = False
-        # logging.debug("Applied shift to template image using scipy.ndimage.shift.")
-
-        # Apply shift to the template mask
-        shifted_mask = ndi_shift(
-            self.template_mask_array.astype(float),
-            shift=(total_shift_y, total_shift_x),
-            mode='constant',
-            order=0  # Nearest-neighbor for masks
-        )
-        shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
-        shifted_mask.flags.writeable = False
+        shifted_image, shifted_mask = self.apply_shift_to_template(total_shift_x, total_shift_y)
         # logging.debug("Applied shift to template mask and re-binarized.")
 
         # Update the display pixmap with the shifted image
@@ -520,7 +542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # logging.debug("Appended MSE and Perceptual Loss to histories.")
 
         # Update plots
-        self.update_plots(self.mse_history, self.pl_history)
+        self.update_plots()
         # logging.debug("Updated MSE and Perceptual Loss plots.")
 
         # Update difference heatmap
@@ -550,32 +572,91 @@ class MainWindow(QtWidgets.QMainWindow):
                                          False)
         return pl
 
-    def update_plots(self, mse_values, pl_values):
+    def compute_and_apply_shift(self):
         """
-        Update the plots with new MSE and perceptual loss values.
+        Apply the current shift if non-zero, then compute a new shift using phase_cross_correlation,
+        and update all displays with the new shift.
         """
-        shift_steps = range(len(mse_values))
-        # logging.debug(f"Updating plots with {len(mse_values)} data points.")
+        if self.template_image_array is None or self.ref_image_array is None:
+            QtWidgets.QMessageBox.warning(self, "Missing Images", "Both reference and template images are required.")
+            return
 
-        # Update MSE Plot
+        # Step 1: Apply current shift (if non-zero) to the template image
+        shift_x = self.config["current_deltax"]
+        shift_y = self.config["current_deltay"]
+        print(f"Current shift: X={shift_x}, Y={shift_y}")
+        if shift_x != 0.0 or shift_y != 0.0:
+            shifted_image, shifted_mask = self.apply_shift_to_template(shift_x, shift_y)
+        else:
+            shifted_image = self.template_image_array
+            shifted_mask = self.template_mask_array
+
+        # Step 2: Compute the new shift using phase_cross_correlation
+        shift_yx = ppi.compute_shift(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+      
+        # Step 3: Add the computed shift to the current shift values
+        new_shift_x = self.config["current_deltax"] + shift_yx[1]
+        new_shift_y = self.config["current_deltay"] + shift_yx[0]
+
+        # Update the total shift in the configuration
+        self.config["current_deltax"] = new_shift_x
+        self.config["current_deltay"] = new_shift_y
+        print(f"New shift: X={new_shift_x}, Y={new_shift_y}")
+
+        # Update the shift fields at the top of the interface
+        self.deltaX_edit.setText(str(self.config["current_deltax"]))
+        self.deltaY_edit.setText(str(self.config["current_deltay"]))
+
+        # Step 4: Apply the new shift and update all displays
+        self.apply_shift_and_update_overlay()
+
+        # Step 5: Recompute MSE, Perceptual Loss, Heatmap, and Graphs
+        #self.compute_and_display_heatmap(shifted_image, shifted_mask)
+        self.update_plots()
+
+    def update_plots(self):
+        """
+        Update the plots with new MSE and perceptual loss values, and annotate the shifts.
+        """
+        
+        shift_steps = range(len(self.mse_history))  # X-axis will represent shift steps
+
+        # Clear the plots before updating
         self.mse_ax.clear()
+        self.pl_ax.clear()
+
+        # Plot MSE over shifts
         self.mse_ax.set_title("MSE over Shifts")
         self.mse_ax.set_xlabel("Shift Steps")
         self.mse_ax.set_ylabel("MSE")
-        self.mse_ax.plot(shift_steps, mse_values, 'r-')
-        self.mse_canvas.draw()
-        # logging.debug("Updated MSE plot.")
+        self.mse_ax.plot(shift_steps, self.mse_history, 'r-')
 
-        # Update Perceptual Loss Plot
-        self.pl_ax.clear()
+        # Annotate shifts on the MSE plot
+        for i, mse in enumerate(self.mse_history):
+            shift_x = self.shift_x_history[i]
+            shift_y = self.shift_y_history[i]
+            self.mse_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], mse),
+                                textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='red')
+
+        # Plot Perceptual Loss over shifts
         self.pl_ax.set_title("Perceptual Loss over Shifts")
         self.pl_ax.set_xlabel("Shift Steps")
         self.pl_ax.set_ylabel("Perceptual Loss")
-        self.pl_ax.plot(shift_steps, pl_values, 'b-')
+        self.pl_ax.plot(shift_steps, self.pl_history, 'b-')
+
+        # Annotate shifts on the Perceptual Loss plot
+        for i, pl in enumerate(self.pl_history):
+            shift_x = self.shift_x_history[i]
+            shift_y = self.shift_y_history[i]
+            self.pl_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], pl),
+                                textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='blue')
+
+        # Redraw the updated plots
+        self.mse_canvas.draw()
         self.pl_canvas.draw()
-        # logging.debug("Updated Perceptual Loss plot.")
 
     def compute_and_display_heatmap(self, shifted_template_image, shifted_template_mask):
+        #print(f"compute_and_display_heatmap")
         """
         Compute and display the masked difference heatmap between reference and shifted template images.
 
@@ -590,6 +671,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Heatmap Error", f"Failed to compute heatmap: {e}")
 
     def compute_difference_heatmap(self, shifted_template_image, shifted_template_mask):
+        #print(f"compute_difference_heatmap")
         """
         Compute and display the masked difference heatmap between reference and shifted template images.
 
@@ -626,6 +708,7 @@ class MainWindow(QtWidgets.QMainWindow):
         normed_template[combined_mask] = (shifted_template_image[combined_mask] - mean_template) / std_template
         # Compute absolute difference
         diff_array = np.abs(normed_ref - normed_template)
+        print(f"compute_difference_heatmap sum: {np.sum(diff_array)}")
         # Plot the heatmap using the updated HeatmapCanvas
         self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 

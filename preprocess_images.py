@@ -97,6 +97,11 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     ref_image_rgb = ensure_rgb(ref_image)
     mov_image_rgb = ensure_rgb(mov_image)
     
+    valid_pixels = np.sum(combined_mask)
+    perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
+
+    print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
+
     # Zero out invalid pixels according to the combined mask
     ref_image_rgb[~combined_mask] = 0
     mov_image_rgb[~combined_mask] = 0
@@ -218,6 +223,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     torch.cuda.synchronize()
     end = time.time()
     #print(f"***total time to compute the perceptual loss = {end - start}***")
+    print(f"***perceptual loss = {total_loss}***")
     return total_loss
 
 
@@ -575,6 +581,27 @@ def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_m
 
 
 # In[36]:
+def compute_shift(ref_image, shifted_image, ref_mask, shifted_mask):
+    #i have different way of applying the mask to the image before computing the phase cross correlation
+    #for some corner cases where there are a lot of invalid pixels, fully blacking out the masked pixels 
+    #results in very wrong results. Weighting them by half seems like it is an ok compromise. Needs more testing though.
+    #ref_masked = ref_image * (ref_mask.astype(ref_image.dtype) * 0.1 + 0.9)
+    #mov_masked = shifted_image * (shifted_mask.astype(shifted_image.dtype) * 0.1 + 0.9)
+    #completely black out the masked pixels
+    #ref_masked = ref_image * ref_mask.astype(ref_image.dtype)
+    #mov_masked = shifted_image * shifted_mask.astype(shifted_image.dtype)
+    #do not mask the pixels at all
+    ref_masked = ref_image 
+    mov_masked = shifted_image
+
+    # Compute the shift (delta_x, delta_y) between reference and template image
+    shift_yx, error, diffphase = phase_cross_correlation(
+            ref_image,
+            mov_masked,
+            upsample_factor=1000
+        )
+    return shift_yx
+      
 
 
 def iterative_align_refinement_with_perceptual_loss(
@@ -953,17 +980,21 @@ def preprocess_imgset(base_dir, feature_extractor):
             ref_mask=sm_downscaled,
             original_moving_image=lr,
             original_moving_mask=qm_binary,
-            max_iterations=14,
+            max_iterations=5,
             shift_dampening=1.0,  # Apply only half of the computed shift each iteration
             debug=False  # Enable visualization
         )
         #throw out the zeroth item in the list
-        for a in [shifts_history, loss_history, mse_history, ssim_history]:
-            a.pop(0)
+        #for a in [shifts_history, loss_history, mse_history, ssim_history]:
+        #    a.pop(0)
+        shift_y = [float(shift[0]) for shift in shifts_history]
+        shift_x = [float(shift[1]) for shift in shifts_history]
+
+        for i in range(len(shifts_history)):
+            print(f"shifts[{i}] = {shift_y[i], shift_x[i]}, pl[{i}] = {loss_history[i]}, mse[{i}] = {mse_history[i]}, ssim[{i}] = {ssim_history[i]}")
 
 
-        shift_y = [shift[0] for shift in shifts_history]
-        shift_x = [shift[1] for shift in shifts_history]
+    
 
         # Plotting functions
         plot_metrics_vs_shifts(shift_x, shift_y, ssim_history, mse_history, loss_history)
