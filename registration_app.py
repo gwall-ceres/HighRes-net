@@ -61,6 +61,19 @@ class MainWindow(QtWidgets.QMainWindow):
         compute_shift_action.triggered.connect(self.compute_and_apply_shift)
         toolbar.addAction(compute_shift_action)
 
+        # ----- Dropdown Menu for Visualization -----
+        self.layer_dropdown = QtWidgets.QComboBox(self)
+        self.layer_dropdown.addItem("Heatmap")
+        self.layer_dropdown.addItem("Layer 0 (Conv1)")
+        self.layer_dropdown.addItem("Layer 5 (Conv2)")
+        self.layer_dropdown.addItem("Layer 10 (Conv3)")
+        self.layer_dropdown.addItem("Layer 19 (Conv4)")
+        self.layer_dropdown.addItem("Layer 28 (Conv5)")
+
+        self.layer_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
+        toolbar.addWidget(self.layer_dropdown)
+
+
         # ----- Central Widget and Grid Layout -----
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -181,11 +194,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_mask_array = None  # Original Template Mask (Grayscale)
         self.template_mask_pixmap = None
 
+        self.diff_features = None
+
         # ----- Initialize Loss Histories -----
         self.mse_history = []
         self.pl_history = []
         self.shift_x_history = []
         self.shift_y_history = []
+        
 
         # ----- Initialize Plots -----
         self.initialize_plots()
@@ -533,7 +549,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Compute Losses
         mse = self.compute_mse(shifted_image, shifted_mask)
-        pl = self.compute_perceptual_loss(shifted_image, shifted_mask)
+        pl, self.diff_features = self.compute_perceptual_loss(shifted_image, shifted_mask)
         # logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
 
         # Append to loss history
@@ -563,14 +579,14 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         # Placeholder: using MSE as a stand-in
         #pl = self.compute_mse(shifted_template, shifted_template_mask)
-        pl = ppi.compute_perceptual_loss(self.perceptual_loss_model,
+        pl, diff_features = ppi.compute_perceptual_loss(self.perceptual_loss_model,
                                          self.ref_image_array,
                                          shifted_template,
                                          self.ref_mask_array,
                                          shifted_template_mask,
                                          self.perceptual_loss_model.hardware,
                                          False)
-        return pl
+        return pl, diff_features
 
     def compute_and_apply_shift(self):
         """
@@ -664,11 +680,24 @@ class MainWindow(QtWidgets.QMainWindow):
             shifted_template_image (np.ndarray): Shifted template image array.
             shifted_template_mask (np.ndarray): Shifted template mask array.
         """
+        selected_choice = self.layer_dropdown.currentText()
+        if selected_choice == "Heatmap":
+            self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
+        else:
+            selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
+            #print(f"selected_layer = {selected_layer}")
+            if self.diff_features is not None:
+                #print(f"diff_features keys = {self.diff_features.keys()}")
+                activations = self.diff_features[selected_layer]
+                self.heatmap_canvas.plot_heatmap(activations, mask=None, cmap='jet')
+        
+        '''
         try:
             self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
         except Exception as e:
             logging.error(f"Error computing and displaying heatmap: {e}")
             QtWidgets.QMessageBox.critical(self, "Heatmap Error", f"Failed to compute heatmap: {e}")
+        '''
 
     def compute_difference_heatmap(self, shifted_template_image, shifted_template_mask):
         #print(f"compute_difference_heatmap")
@@ -712,22 +741,27 @@ class MainWindow(QtWidgets.QMainWindow):
         # Plot the heatmap using the updated HeatmapCanvas
         self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 
-        '''
-        ref_masked = self.ref_image_array * (self.ref_mask_array.astype(np.float32) * 0.5 + 0.5)
-        mov_masked = shifted_template_image * (shifted_template_mask.astype(np.float32) * 0.5 + 0.5)
-        diff_array = np.abs(ref_masked - mov_masked)
-        # Plot the heatmap using the updated HeatmapCanvas
-        self.heatmap_canvas.plot_heatmap(diff_array, mask=None, cmap='jet')
-        '''
 
-
-    def save_heatmap(self):
+    
+    def update_visualization_choice(self):
         """
-        Save the current heatmap as an image file.
+        Update the visualization choice based on the selected item in the dropdown menu.
         """
-        # Since the user doesn't need this feature, this method can be removed.
-        pass
-
+        selected_choice = self.layer_dropdown.currentText()
+        
+        if selected_choice == "Heatmap":
+            pass
+            #self.compute_and_display_heatmap(self.shifted_template_image, self.shifted_template_mask)
+        else:
+            selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
+            #print(f"selected_layer = {selected_layer}")
+            if self.diff_features is not None:
+                #print(f"diff_features keys = {self.diff_features.keys()}")
+                activations = self.diff_features[selected_layer]
+                self.heatmap_canvas.plot_heatmap(activations, mask=None, cmap='jet')
+        
+          
+    
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

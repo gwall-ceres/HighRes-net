@@ -130,6 +130,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     # If the model returns a dictionary, ensure consistent ordering
     if isinstance(ref_features, dict):
         feature_names = sorted(ref_features.keys())
+        print(f"feature_names = {feature_names}")
         ref_features = [ref_features[name] for name in feature_names]
         mov_features = [mov_features[name] for name in feature_names]
     elif isinstance(ref_features, list) or isinstance(ref_features, tuple):
@@ -150,6 +151,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         fig = None
         axes = None
     
+    diff_features = {}
     # Iterate over each pair of feature maps
     for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
         layer_name = f"Layer_{idx+1}"
@@ -165,12 +167,22 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         # Apply the mask to both feature maps
         ref_feat_masked = ref_feat * mask_expanded
         mov_feat_masked = mov_feat * mask_expanded
+
+        # Calculate total number of valid activations (channels * spatial dimensions * mask)
+        num_valid_activations = torch.sum(mask_expanded)  # This gives us valid spatial positions * channels
+        print(f"num_valid_activations = {num_valid_activations}")
         
-        # Compute the Mean Squared Error (MSE) between the masked feature maps
-        mse_loss = F.mse_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / torch.sum(mask_expanded)
-        
+        # Compute the Mean L1 Error between the masked feature maps
+        l1_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid_activations
+        l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)  # Element-wise differences
+        #sum over the channels
+        l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid_activations  # sum over the channels, then squeeze to remove the extra dimension
+        l1_loss2 = l1_diff_summed.sum() #/ num_valid_activations
+        print(f"perc loss -> l1_loss = {l1_loss}, l1_loss2 = {l1_loss2}")
+        diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()  # Save the l1 differences
+    
         # Accumulate the loss
-        total_loss += mse_loss.item()
+        total_loss += l1_loss.item()
         
         if debug:
             # Select 2 random channels
@@ -223,8 +235,9 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     torch.cuda.synchronize()
     end = time.time()
     #print(f"***total time to compute the perceptual loss = {end - start}***")
+    total_loss = total_loss / len(ref_features) #average over the layers
     print(f"***perceptual loss = {total_loss}***")
-    return total_loss
+    return total_loss, diff_features
 
 
 def contrast_stretch_8bit(image):
@@ -644,7 +657,7 @@ def iterative_align_refinement_with_perceptual_loss(
         shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
 
         # Compute perceptual loss between reference and shifted moving image
-        perceptual_loss = compute_perceptual_loss(model, ref_image, shifted_image, ref_mask, shifted_mask, model.hardware, False)
+        perceptual_loss, diff_features = compute_perceptual_loss(model, ref_image, shifted_image, ref_mask, shifted_mask, model.hardware, False)
         mse = compute_mse(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True, normalize=True)
         ssim_score = compute_ssim(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True)
 
