@@ -198,18 +198,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_canvas = FigureCanvas(self.ml1e_fig)
         self.ml1e_ax = self.ml1e_fig.add_subplot(111)
         self.ml1e_ax.set_title("ml1e over Shifts")
-        self.ml1e_ax.set_xlabel("Shift Steps")
+        #self.ml1e_ax.set_xlabel("Shift Steps")
         self.ml1e_ax.set_ylabel("ml1e")
         graphs_layout.addWidget(self.ml1e_canvas)
-
-        # Initialize Perceptual Loss Plot
-        self.pl_fig = Figure(figsize=(4, 3))
-        self.pl_canvas = FigureCanvas(self.pl_fig)
-        self.pl_ax = self.pl_fig.add_subplot(111)
-        self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_xlabel("Shift Steps")
-        self.pl_ax.set_ylabel("Perceptual Loss")
-        graphs_layout.addWidget(self.pl_canvas)
 
         #Add new figure/canvas for combined metrics
         self.metrics_fig = Figure(figsize=(4, 3))
@@ -279,6 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_image_from_path("template_mask", self.config["template_mask"])
 
     def reset_history(self):
+        # Reset all history lists
         self.ml1e_history = []
         self.pl_history = []
         self.ssim_history = []
@@ -287,10 +279,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shift_x_history = []
         self.shift_y_history = []
 
-        # Clear the plots before updating
+        # Clear the plots
         self.ml1e_ax.clear()
-        self.pl_ax.clear()
         self.metrics_ax.clear()
+        
+        # Reset the axes titles and labels
+        self.ml1e_ax.set_title("ml1e and Perceptual Loss over Shifts")
+        self.ml1e_ax.set_xlabel("Shifts (x, y)")
+        self.ml1e_ax.set_ylabel("ml1e")
+        
+        self.metrics_ax.set_title("Registration Metrics")
+        self.metrics_ax.set_xlabel("Shifts (x, y)")
+        self.metrics_ax.set_ylabel("Metric Value")
+        
+        # Redraw the empty canvases
+        self.ml1e_canvas.draw()
+        self.metrics_canvas.draw()
 
     def initialize_plots(self):
         """
@@ -303,13 +307,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_ax.plot([], [], 'r-')
         self.ml1e_canvas.draw()
 
-        self.pl_ax.clear()
-        self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_xlabel("Shift Steps")
-        self.pl_ax.set_ylabel("Perceptual Loss")
-        self.pl_ax.plot([], [], 'b-')
-        self.pl_canvas.draw()
-        # logging.debug("Initialized ml1e and Perceptual Loss plots.")
 
     def load_image(self, image_type):
         """
@@ -329,6 +326,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.ref_image_array is None or self.template_image_array is None:
             return
 
+        #save the original reference image
+        self.ref_image_orig = self.ref_image_array
         if self.ref_image_array.shape != self.template_image_array.shape:
             # Get template dimensions
             template_height, template_width = self.template_image_array.shape
@@ -342,6 +341,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 anti_aliasing=True,
                 preserve_range=True
             ).astype(np.float32)
+            
             
             self.ref_image_array = resized_ref
             self.ref_image_array.flags.writeable = False
@@ -480,11 +480,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Apply contrast stretching to both arrays
-        ref_enhanced = ppi.contrast_stretch_8bit(self.ref_image_array)
+        ref_enhanced = ppi.contrast_stretch_8bit(self.ref_image_orig)
+            #self.ref_image_array)
         template_enhanced = ppi.contrast_stretch_8bit(shifted_template_image)
+        # Resize reference image using Lanczos interpolation
+        template_enhanced = transform.resize(
+                template_enhanced,
+                ref_enhanced.shape,
+                order=4,  # Lanczos interpolation
+                mode='reflect',
+                anti_aliasing=True,
+                preserve_range=True
+            ).astype(np.float32)
 
         # Create a 3-channel RGB overlay using the enhanced arrays
-        overlay_array = np.zeros((self.ref_image_array.shape[0], self.ref_image_array.shape[1], 3), dtype=np.uint8)
+        overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
         overlay_array[:, :, 0] = template_enhanced       # Red channel (Template Image)
         overlay_array[:, :, 1] = ref_enhanced           # Green channel (Reference Image)
         overlay_array[:, :, 2] = ref_enhanced           # Blue channel (Reference Image), creating cyan
@@ -737,20 +747,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_best_shift(self):
         """
-        Apply the shift that resulted in the best (lowest) perceptual loss seen so far.
+        Apply the shift that was voted best across multiple metrics.
+        SSIM, NMI, NCC: higher is better
+        ML1E, PL: lower is better
         """
         if len(self.pl_history) == 0:
             QtWidgets.QMessageBox.warning(self, "No History", 
                                         "No shifts have been applied yet.")
             return
 
-        # Find the index of the minimum perceptual loss
-        best_idx = np.argmin(self.pl_history)
-        best_shift_x = self.shift_x_history[best_idx]
-        best_shift_y = self.shift_y_history[best_idx]
-        best_pl = self.pl_history[best_idx]
+        # Get indices of best values for each metric
+        best_indices = {
+            # For metrics where lower is better (minimize)
+            'ML1E': np.argmin(self.ml1e_history),
+            'PL': np.argmin(self.pl_history),
+            # For metrics where higher is better (maximize)
+            'SSIM': np.argmax(self.ssim_history),
+            'NMI': np.argmax(self.nmi_history),
+            'NCC': np.argmax(self.ncc_history)
+        }
 
-        print(f"Applying best shift: X={best_shift_x}, Y={best_shift_y} (PL={best_pl})")
+        # Count votes for each index
+        vote_counts = {}
+        for metric, index in best_indices.items():
+            vote_counts[index] = vote_counts.get(index, 0) + 1
+            print(f"{metric} votes for shift index {index}")
+
+        # Find the index with the most votes
+        winning_index = max(vote_counts.items(), key=lambda x: x[1])[0]
+        winning_votes = vote_counts[winning_index]
+        
+        # Get the corresponding shifts
+        best_shift_x = self.shift_x_history[winning_index]
+        best_shift_y = self.shift_y_history[winning_index]
+
+        # Print detailed results
+        print(f"\nVoting Results:")
+        print(f"Winning shift index {winning_index} with {winning_votes} votes")
+        print(f"Applying shift: X={best_shift_x:.3f}, Y={best_shift_y:.3f}")
+        print(f"Metric values at winning shift:")
+        print(f"ML1E: {self.ml1e_history[winning_index]:.3f}")
+        print(f"PL: {self.pl_history[winning_index]:.3f}")
+        print(f"SSIM: {self.ssim_history[winning_index]:.3f}")
+        print(f"NMI: {self.nmi_history[winning_index]:.3f}")
+        print(f"NCC: {self.ncc_history[winning_index]:.3f}")
 
         # Update the current shifts
         self.config["current_deltax"] = best_shift_x
@@ -798,7 +838,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Step 1: Apply current shift (if non-zero) to the template image
         shift_x = self.config["current_deltax"]
         shift_y = self.config["current_deltay"]
-        print(f"Current shift: X={shift_x}, Y={shift_y}")
+        #print(f"Current shift: X={shift_x}, Y={shift_y}")
         if shift_x != 0.0 or shift_y != 0.0:
             shifted_image, shifted_mask = self.apply_shift_to_template(shift_x, shift_y)
         else:
@@ -849,39 +889,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Clear the plots before updating
         self.ml1e_ax.clear()
-        self.pl_ax.clear()
         self.metrics_ax.clear()
+        # Clear the twin axis if it exists
+        for ax in self.ml1e_fig.axes:
+            if ax != self.ml1e_ax:
+                self.ml1e_fig.delaxes(ax)
         
-        # Plot ml1e over shifts
-        self.ml1e_ax.set_title("ml1e over Shifts")
-        self.ml1e_ax.set_ylabel("ml1e")
-        self.ml1e_ax.plot(shift_steps, self.ml1e_history, 'r-')
+        # Create new twin axis for perceptual loss
+        pl_ax = self.ml1e_ax.twinx()
+        
+        # Plot ml1e over shifts (red, left axis)
+        ml1e_line = self.ml1e_ax.plot(shift_steps, self.ml1e_history, 'r-', label='ml1e')
+        self.ml1e_ax.set_ylabel("ml1e", color='r')
+        self.ml1e_ax.tick_params(axis='y', labelcolor='r')
 
-        # Plot Perceptual Loss over shifts
-        self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_ylabel("Perceptual Loss")
-        self.pl_ax.plot(shift_steps, self.pl_history, 'b-')
+        # Plot Perceptual Loss over shifts (blue, right axis)
+        pl_line = pl_ax.plot(shift_steps, self.pl_history, 'b-', label='Perceptual Loss')
+        pl_ax.set_ylabel("Perceptual Loss", color='b')
+        pl_ax.tick_params(axis='y', labelcolor='b')
 
-        # Normalize each metric to [0,1] range for comparison
-        def normalize_metric(metric_history):
-            '''
-            if not metric_history:
-                return []
-            min_val = min(metric_history)   
-            max_val = max(metric_history)
-            if max_val == min_val:
-                return [1.0] * len(metric_history)
-            return [(x - min_val) / (max_val - min_val) for x in metric_history]
-            '''
-            return metric_history
+        # Add combined title
+        self.ml1e_ax.set_title("ml1e and Perceptual Loss over Shifts")
 
-        # Plot normalized metrics
-        if self.ssim_history:
-            self.metrics_ax.plot(shift_steps, normalize_metric(self.ssim_history), 'g-', label='SSIM')
-        if self.nmi_history:
-            self.metrics_ax.plot(shift_steps, normalize_metric(self.nmi_history), 'y-', label='NMI')
-        if self.ncc_history:
-            self.metrics_ax.plot(shift_steps, normalize_metric(self.ncc_history), 'm-', label='NCC')
+        # Add combined legend
+        lines = ml1e_line + pl_line
+        labels = [line.get_label() for line in lines]
+        self.ml1e_ax.legend(lines, labels, loc='upper right')
 
         # Create x-axis labels showing the shifts
         x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history, self.shift_y_history)]
@@ -890,29 +923,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_ax.set_xticks(shift_steps)
         self.ml1e_ax.set_xticklabels(x_labels, rotation=45, ha='right')
         
-        self.pl_ax.set_xticks(shift_steps)
-        self.pl_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        # Add x-axis label
+        self.ml1e_ax.set_xlabel("Shifts (x, y)")
+
+        # Plot normalized metrics in the second graph
+        if self.ssim_history:
+            self.metrics_ax.plot(shift_steps, self.ssim_history, 'g-', label='SSIM')
+        if self.nmi_history:
+            self.metrics_ax.plot(shift_steps, self.nmi_history, 'y-', label='NMI')
+        if self.ncc_history:
+            self.metrics_ax.plot(shift_steps, self.ncc_history, 'm-', label='NCC')
 
         self.metrics_ax.set_xticks(shift_steps)
         self.metrics_ax.set_xticklabels(x_labels, rotation=45, ha='right')
         
         self.metrics_ax.set_xlabel("Shifts (x, y)")
-        self.metrics_ax.set_ylabel("Normalized Metric Value")
+        self.metrics_ax.set_ylabel("Metric Value")
         self.metrics_ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-
-        # Add a label explaining the format
-        self.ml1e_ax.set_xlabel("Shifts (x, y)")
-        self.pl_ax.set_xlabel("Shifts (x, y)")
 
         # Adjust layout to prevent label cutoff
         self.ml1e_fig.tight_layout()
-        self.pl_fig.tight_layout()
-        # Adjust layout
         self.metrics_fig.tight_layout()
 
         # Redraw the updated plots
         self.ml1e_canvas.draw()
-        self.pl_canvas.draw()
         self.metrics_canvas.draw()
 
 
@@ -948,13 +982,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 activations = self.diff_features[selected_layer]
                 self.heatmap_canvas.plot_heatmap(activations, mask=None, cmap='jet')
         
-        '''
-        try:
-            self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
-        except Exception as e:
-            logging.error(f"Error computing and displaying heatmap: {e}")
-            QtWidgets.QMessageBox.critical(self, "Heatmap Error", f"Failed to compute heatmap: {e}")
-        '''
 
     def compute_difference_heatmap(self, shifted_template_image, shifted_template_mask):
         #print(f"compute_difference_heatmap")
@@ -994,7 +1021,7 @@ class MainWindow(QtWidgets.QMainWindow):
         normed_template[combined_mask] = (shifted_template_image[combined_mask] - mean_template) / std_template
         # Compute absolute difference
         diff_array = np.abs(normed_ref - normed_template)
-        print(f"compute_difference_heatmap sum: {np.sum(diff_array)}")
+        #print(f"compute_difference_heatmap sum: {np.sum(diff_array)}")
         # Plot the heatmap using the updated HeatmapCanvas
         self.heatmap_canvas.plot_heatmap(diff_array, mask=combined_mask, cmap='jet')
 

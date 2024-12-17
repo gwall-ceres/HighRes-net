@@ -667,7 +667,7 @@ def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     return shift_yx
       
 
-def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_threshold=0.75, ransac_threshold=2):
+def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_threshold=0.75, ransac_threshold=2, scale=4):
     """
     Aligns two images using point matching to estimate a subpixel shift.
 
@@ -682,9 +682,24 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
     - aligned_image: Aligned version of image2.
     - shift: Estimated (y, x) shift.
     """
+    shape = ref_image.shape
     # Convert images to floating point
-    image1 = img_as_float(ref_image.copy())
-    image2 = img_as_float(tmplt_image.copy())
+    image1 = transform.resize(
+                img_as_float(ref_image),
+                (shape[0]*scale, shape[1]*scale),
+                order=3,  # Cubic interpolation
+                mode='reflect',
+                anti_aliasing=True,
+                preserve_range=True)
+    
+
+    image2 = transform.resize(
+                img_as_float(tmplt_image),
+                (shape[0]*scale, shape[1]*scale),
+                order=3,  # Cubic interpolation
+                mode='reflect',
+                anti_aliasing=True,
+                preserve_range=True)
 
     # Initialize ORB detector
     orb = ORB(n_keypoints=n_keypoints, fast_threshold=0.05)
@@ -736,8 +751,8 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
     #aligned_image = ndi_shift(image2, shift=(-shift_y, -shift_x), mode='nearest', order=3)
 
     # The total estimated shift is (y, x)
-    shift_yx = (shift_y, shift_x)
-
+    shift_yx = (shift_y/scale, shift_x/scale)
+    print(f"point matching shift_yx {shift_yx}")
     return shift_yx
 
 
