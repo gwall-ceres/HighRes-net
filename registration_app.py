@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 import registration_helpers as rh
 import preprocess_images as ppi
 from heatmap_canvas import HeatmapCanvas
+from VGGFeatureExtractor import VGGFeatureExtractor
 
 
 # Corrected logging configuration to suppress DEBUG messages
@@ -33,7 +34,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super(MainWindow, self).__init__(parent)
 
         # Initialize the perceptual loss model
-        self.perceptual_loss_model = ppi.init_VGG_for_perceptual_loss()
+        self.perceptual_loss_model = VGGFeatureExtractor.init_VGG_for_perceptual_loss()
 
         # ----- Load Configuration -----
         self.config = rh.load_config()

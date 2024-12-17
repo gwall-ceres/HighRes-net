@@ -14,41 +14,6 @@ import os
 import random
 import json
 import time
-from torchvision.models import VGG19_Weights
-
-
-# Define the VGGFeatureExtractor with updated weights parameter
-class VGGFeatureExtractor(torch.nn.Module):
-    def __init__(self, layers=['0', '5', '10', '19', '28']):
-        super(VGGFeatureExtractor, self).__init__()
-        # Use the updated 'weights' parameter instead of 'pretrained'
-        self.vgg = models.vgg19(weights=VGG19_Weights.DEFAULT).features[:int(layers[-1])+1]
-        self.layers = layers
-
-        if torch.cuda.is_available():
-            self.hardware = 'cuda'
-            print("VGG using CUDA")
-        else:
-            self.hardware = 'cpu'
-
-    def forward(self, x):
-        outputs = {}
-        for name, layer in self.vgg._modules.items():
-            x = layer(x)
-            if name in self.layers:
-                outputs[name] = x
-        return outputs
-
-
-def init_VGG_for_perceptual_loss():
-    # Initialize the feature extractor
-    feature_extractor = VGGFeatureExtractor(layers=['0', '5', '10', '19', '28']).to('cuda' if torch.cuda.is_available() else 'cpu')
-    feature_extractor.eval()
-    # Disable gradient computations
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
-
-    return feature_extractor
 
 
 def align_images_point_matching_skimage_shift(image1, image2, n_keypoints=500, match_threshold=0.75, ransac_threshold=2):
@@ -185,7 +150,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet means
                              std=[0.229, 0.224, 0.225])   # ImageNet stds
     ])
-    torch.cuda.synchronize()
+    #torch.cuda.synchronize()
     start = time.time()
     # Apply preprocessing to both images
     ref_tensor = preprocess(ref_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
@@ -304,7 +269,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     if debug and fig is not None:
         plt.tight_layout()
         plt.show()
-    torch.cuda.synchronize()
+    #torch.cuda.synchronize()
     end = time.time()
     #print(f"***total time to compute the perceptual loss = {end - start}***")
     #total_loss = total_loss / len(ref_features) #average over the layers
