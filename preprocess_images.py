@@ -16,81 +16,7 @@ import json
 import time
 
 
-def align_images_point_matching_skimage_shift(image1, image2, n_keypoints=500, match_threshold=0.75, ransac_threshold=2):
-    """
-    Aligns two images using point matching to estimate a subpixel shift.
-
-    Parameters:
-    - image1: Reference image (numpy array).
-    - image2: Image to be aligned (numpy array).
-    - n_keypoints: Number of keypoints to detect.
-    - match_threshold: Threshold for Lowe's ratio test (not directly used here).
-    - ransac_threshold: RANSAC inlier threshold in pixels.
-
-    Returns:
-    - aligned_image: Aligned version of image2.
-    - shift: Estimated (y, x) shift.
-    """
-    # Convert images to floating point
-    image1 = img_as_float(image1)
-    image2 = img_as_float(image2)
-
-    # Initialize ORB detector
-    orb = ORB(n_keypoints=n_keypoints, fast_threshold=0.05)
-
-    # Detect and extract features from image1
-    orb.detect_and_extract(image1)
-    keypoints1 = orb.keypoints
-    descriptors1 = orb.descriptors
-
-    # Detect and extract features from image2
-    orb.detect_and_extract(image2)
-    keypoints2 = orb.keypoints
-    descriptors2 = orb.descriptors
-
-    # Match descriptors using mutual nearest neighbors
-    matches12 = match_descriptors(descriptors1, descriptors2, cross_check=True)
-
-    if len(matches12) < 4:
-        raise ValueError("Not enough matches found for reliable alignment.")
-
-    # Extract matched keypoints
-    src = keypoints1[matches12[:, 0]][:, ::-1]  # (x, y)
-    dst = keypoints2[matches12[:, 1]][:, ::-1]  # (x, y)
-
-    # Estimate translation using RANSAC
-    # Define a transformation model: translation only
-    model = SimilarityTransform(scale=1, rotation=0, translation=(0, 0))
-    try:
-        model_robust, inliers = ransac((src, dst),
-                                       SimilarityTransform,
-                                       min_samples=2,
-                                       residual_threshold=ransac_threshold,
-                                       max_trials=1000)
-    except Exception as e:
-        raise ValueError(f"RANSAC failed to find a robust model: {e}")
-
-    if model_robust is None:
-        raise ValueError("RANSAC failed to find a robust model.")
-
-    # Extract translation
-    estimated_translation = model_robust.translation  # (tx, ty)
-
-    # Since SimilarityTransform includes both x and y translations,
-    # and we set rotation=0 and scale=1, we can directly use the translation components.
-    shift_x, shift_y = estimated_translation  # (x_shift, y_shift)
-
-    # Apply the estimated shift using scipy.ndimage.shift
-    # Note: shift expects (y, x) order
-    aligned_image = ndi_shift(image2, shift=(-shift_y, -shift_x), mode='nearest', order=3)
-
-    # The total estimated shift is (y, x)
-    shift = (shift_y, shift_x)
-
-    return aligned_image, shift
-
-
-def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False):
+def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu'):
     """
     Compute the perceptual loss between two images given their masks.
     Optionally visualize selected activations and masks for debugging.
@@ -114,8 +40,8 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     assert ref_mask.shape == mov_mask.shape, "Reference and moving masks must have the same height and width."
     
     # Combine masks to focus on overlapping valid regions
-    combined_mask = ref_mask & mov_mask  # Shape: (H, W)
-    
+    #combined_mask = ref_mask & mov_mask  # Shape: (H, W)
+    combined_mask = ref_mask.astype(float) * mov_mask.astype(float)  # Shape: (H, W)
     # Function to convert grayscale to RGB by replicating channels
     def ensure_rgb(img):
         if img.ndim == 2:
@@ -131,8 +57,8 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
             raise ValueError("Input image must have shape (H, W), (H, W, 1), or (H, W, 3)")
     
     # Convert images to RGB if necessary
-    ref_image_rgb = ensure_rgb(ref_image)
-    mov_image_rgb = ensure_rgb(mov_image)
+    ref_image_rgb = ensure_rgb(ref_image * combined_mask)
+    mov_image_rgb = ensure_rgb(mov_image * combined_mask)
     
     valid_pixels = np.sum(combined_mask)
     perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
@@ -140,8 +66,8 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     #print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
 
     # Zero out invalid pixels according to the combined mask
-    ref_image_rgb[~combined_mask] = 0
-    mov_image_rgb[~combined_mask] = 0
+    #ref_image_rgb[~combined_mask] = 0
+    #mov_image_rgb[~combined_mask] = 0
     
     # Define the preprocessing pipeline: PIL conversion, tensor conversion, normalization
     preprocess = transforms.Compose([
@@ -177,17 +103,6 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     
     # Initialize total loss
     total_loss = 0.0
-    
-    # For debugging: prepare plots
-    if debug:
-        num_layers = len(ref_features)
-        fig, axes = plt.subplots(num_layers, 5, figsize=(20, 4 * num_layers))
-        if num_layers == 1:
-            axes = [axes]  # Ensure axes is iterable
-    else:
-        fig = None
-        axes = None
-    
     diff_features = {}
     #loss_per_layer = []
     # Iterate over each pair of feature maps
@@ -196,8 +111,38 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         # Get spatial dimensions of the feature map
         _, C, Hf, Wf = ref_feat.shape
         
-        # Resize the combined mask to match the feature map size using nearest neighbor
-        mask_resized = F.interpolate(combined_mask_tensor, size=(Hf, Wf), mode='bilinear', antialias=True)  # Shape: [1, 1, Hf, Wf]
+        # Resize the combined mask to match the feature map size using bicubic interpolation
+        # with a Gaussian pre-filter to smooth transitions
+        mask_resized = F.interpolate(
+            combined_mask_tensor, 
+            size=(Hf, Wf), 
+            mode='bicubic',  # Changed from bilinear to bicubic
+            antialias=True,
+            align_corners=True  # Helps maintain consistency at boundaries
+        )
+        
+        # Optionally apply additional Gaussian smoothing to further reduce discontinuities
+        # This helps create smoother transitions in the mask
+        sigma = 0.5  # Adjust this value to control smoothing amount
+        kernel_size = max(3, int(2 * sigma + 1))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        
+        gaussian_kernel = torch.tensor([
+            [np.exp(-(i**2 + j**2)/(2*sigma**2)) 
+             for i in range(-(kernel_size//2), kernel_size//2 + 1)]
+            for j in range(-(kernel_size//2), kernel_size//2 + 1)
+        ], device=device).float()
+        
+        gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
+        gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size, kernel_size)
+        gaussian_kernel = gaussian_kernel.repeat(1, 1, 1, 1)
+        
+        mask_resized = F.pad(mask_resized, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2), mode='reflect')
+        mask_resized = F.conv2d(mask_resized, gaussian_kernel, groups=1)
+        
+        # Ensure mask values stay in [0, 1] range after all operations
+        mask_resized = torch.clamp(mask_resized, 0, 1)
         
         # Expand mask to match the number of channels in the feature map
         mask_expanded = mask_resized.expand_as(ref_feat)  # Shape: [1, C, Hf, Wf]
@@ -222,59 +167,9 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         # Accumulate the loss
         total_loss += l1_loss.item()
         #loss_per_layer.append(l1_loss.item())
-        if debug:
-            # Select 2 random channels
-            selected_channels = random.sample(range(C), 2) if C >=2 else [0]
-            
-            for i, channel in enumerate(selected_channels):
-                # Get the reference activation
-                ref_activation = ref_feat[0, channel, :, :].cpu().numpy()
-                ref_activation_norm = (ref_activation - ref_activation.min()) / (ref_activation.max() - ref_activation.min() + 1e-8)
-                
-                # Get the moving activation
-                mov_activation = mov_feat[0, channel, :, :].cpu().numpy()
-                mov_activation_norm = (mov_activation - mov_activation.min()) / (mov_activation.max() - mov_activation.min() + 1e-8)
-                
-                # Get the masked activation
-                ref_feat_masked_np = ref_feat_masked[0, channel, :, :].cpu().numpy()
-                mov_feat_masked_np = mov_feat_masked[0, channel, :, :].cpu().numpy()
-                ref_feat_masked_norm = (ref_feat_masked_np - ref_feat_masked_np.min()) / (ref_feat_masked_np.max() - ref_feat_masked_np.min() + 1e-8)
-                mov_feat_masked_norm = (mov_feat_masked_np - mov_feat_masked_np.min()) / (mov_feat_masked_np.max() - mov_feat_masked_np.min() + 1e-8)
-                
-                # Get the resized mask
-                mask_np = mask_resized[0, 0, :, :].cpu().numpy()
-                
-                # Plot original activation
-                axes[idx][0].imshow(ref_activation_norm, cmap='viridis')
-                axes[idx][0].set_title(f"{layer_name} Ref Channel {channel}")
-                axes[idx][0].axis('off')
-                
-                axes[idx][1].imshow(mov_activation_norm, cmap='viridis')
-                axes[idx][1].set_title(f"{layer_name} Mov Channel {channel}")
-                axes[idx][1].axis('off')
-                
-                # Plot masked activations
-                axes[idx][2].imshow(ref_feat_masked_norm, cmap='viridis')
-                axes[idx][2].set_title(f"{layer_name} Ref Masked Channel {channel}")
-                axes[idx][2].axis('off')
-                
-                axes[idx][3].imshow(mov_feat_masked_norm, cmap='viridis')
-                axes[idx][3].set_title(f"{layer_name} Mov Masked Channel {channel}")
-                axes[idx][3].axis('off')
-                
-                # Plot the resized mask
-                axes[idx][4].imshow(mask_np, cmap='gray',vmin=0, vmax=1)
-                axes[idx][4].set_title(f"{layer_name} Resized Mask")
-                axes[idx][4].axis('off')
-    
-    if debug and fig is not None:
-        plt.tight_layout()
-        plt.show()
-    #torch.cuda.synchronize()
-    end = time.time()
 
     #print(f"***total time to compute the perceptual loss = {end - start}***")
-    #total_loss = total_loss / len(ref_features) #average over the layers
+    total_loss = total_loss / len(ref_features) #average over the layers
     print(f"***perceptual loss = {total_loss}***")
     return total_loss, diff_features
 
@@ -328,10 +223,11 @@ def compute_sum_of_layers(diff_features, normalize=True):
         # Add to sum
         summed_activations += scaled_activations
     
-    # Optionally normalize the final sum to [0,1] range
-    final_max = np.max(np.abs(summed_activations))
-    if final_max > 0:
-        summed_activations /= final_max
+    if normalize:
+        # Optionally normalize the final sum to [0,1] range
+        final_max = np.max(np.abs(summed_activations))
+        if final_max > 0:
+            summed_activations /= final_max
         
     return summed_activations
 
@@ -707,8 +603,8 @@ def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_m
     plt.show()
 
 
-# In[36]:
-def compute_shift(ref_image, shifted_image, ref_mask, shifted_mask):
+
+def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     #i have different way of applying the mask to the image before computing the phase cross correlation
     #for some corner cases where there are a lot of invalid pixels, fully blacking out the masked pixels 
     #results in very wrong results. Weighting them by half seems like it is an ok compromise. Needs more testing though.
@@ -729,6 +625,80 @@ def compute_shift(ref_image, shifted_image, ref_mask, shifted_mask):
         )
     return shift_yx
       
+
+def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_threshold=0.75, ransac_threshold=2):
+    """
+    Aligns two images using point matching to estimate a subpixel shift.
+
+    Parameters:
+    - ref_image: Reference image (numpy array).
+    - tmplt_image: Image to be aligned (numpy array).
+    - n_keypoints: Number of keypoints to detect.
+    - match_threshold: Threshold for Lowe's ratio test (not directly used here).
+    - ransac_threshold: RANSAC inlier threshold in pixels.
+
+    Returns:
+    - aligned_image: Aligned version of image2.
+    - shift: Estimated (y, x) shift.
+    """
+    # Convert images to floating point
+    image1 = img_as_float(ref_image.copy())
+    image2 = img_as_float(tmplt_image.copy())
+
+    # Initialize ORB detector
+    orb = ORB(n_keypoints=n_keypoints, fast_threshold=0.05)
+
+    # Detect and extract features from image1
+    orb.detect_and_extract(image1)
+    keypoints1 = orb.keypoints
+    descriptors1 = orb.descriptors
+
+    # Detect and extract features from image2
+    orb.detect_and_extract(image2)
+    keypoints2 = orb.keypoints
+    descriptors2 = orb.descriptors
+
+    # Match descriptors using mutual nearest neighbors
+    matches12 = match_descriptors(descriptors1, descriptors2, cross_check=True)
+
+    if len(matches12) < 4:
+        raise ValueError("Not enough matches found for reliable alignment.")
+
+    # Extract matched keypoints
+    src = keypoints1[matches12[:, 0]][:, ::-1]  # (x, y)
+    dst = keypoints2[matches12[:, 1]][:, ::-1]  # (x, y)
+
+    # Estimate translation using RANSAC
+    # Define a transformation model: translation only
+    model = SimilarityTransform(scale=1, rotation=0, translation=(0, 0))
+    try:
+        model_robust, inliers = ransac((dst, src),
+                                       SimilarityTransform,
+                                       min_samples=2,
+                                       residual_threshold=ransac_threshold,
+                                       max_trials=1000)
+    except Exception as e:
+        raise ValueError(f"RANSAC failed to find a robust model: {e}")
+
+    if model_robust is None:
+        raise ValueError("RANSAC failed to find a robust model.")
+
+    # Extract translation
+    estimated_translation = model_robust.translation  # (tx, ty)
+
+    # Since SimilarityTransform includes both x and y translations,
+    # and we set rotation=0 and scale=1, we can directly use the translation components.
+    shift_x, shift_y = estimated_translation  # (x_shift, y_shift)
+
+    # Apply the estimated shift using scipy.ndimage.shift
+    # Note: shift expects (y, x) order
+    #aligned_image = ndi_shift(image2, shift=(-shift_y, -shift_x), mode='nearest', order=3)
+
+    # The total estimated shift is (y, x)
+    shift_yx = (shift_y, shift_x)
+
+    return shift_yx
+
 
 
 def iterative_align_refinement_with_perceptual_loss(

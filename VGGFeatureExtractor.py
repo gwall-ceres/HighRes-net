@@ -5,13 +5,17 @@ import torch
 
 # Define the VGGFeatureExtractor with updated weights parameter
 class VGGFeatureExtractor(torch.nn.Module):
-    def __init__(self, layers=['0', '5', '10', '19', '28']):
+    layers=['0', '5', '10', '19', '28']
+
+    def __init__(self):
         super(VGGFeatureExtractor, self).__init__()
-        weights_path="./vgg19_conv_layers.pth"
-        self.layers = layers
-        self.vgg = vgg19().features[:29]  # Match truncated layers
+        from torchvision.models import VGG19_Weights
+        self.vgg = vgg19(weights=VGG19_Weights.DEFAULT).features[:int(VGGFeatureExtractor.layers[-1])+1]
+        #weights_path="./vgg19_conv_layers.pth"
+        #self.layers = layers
+        #self.vgg = vgg19().features[:29]  # Match truncated layers
         # Load weights from the saved file
-        self.vgg.load_state_dict(torch.load(weights_path, map_location="cpu"))
+        #self.vgg.load_state_dict(torch.load(weights_path, map_location="cpu"))
 
         if torch.cuda.is_available():
             self.hardware = 'cuda'
@@ -23,14 +27,14 @@ class VGGFeatureExtractor(torch.nn.Module):
         outputs = {}
         for name, layer in self.vgg._modules.items():
             x = layer(x)
-            if name in self.layers:
+            if name in VGGFeatureExtractor.layers:
                 outputs[name] = x
         return outputs
 
     @staticmethod
     def init_VGG_for_perceptual_loss():
         # Initialize the feature extractor
-        feature_extractor = VGGFeatureExtractor(layers=['0', '5', '10', '19', '28']).to('cuda' if torch.cuda.is_available() else 'cpu')
+        feature_extractor = VGGFeatureExtractor().to('cuda' if torch.cuda.is_available() else 'cpu')
         feature_extractor.eval()
         # Disable gradient computations
         for param in feature_extractor.parameters():

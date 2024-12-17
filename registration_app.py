@@ -73,9 +73,32 @@ class MainWindow(QtWidgets.QMainWindow):
         #file_menu.addAction(compute_shift_action)
 
         toolbar = self.addToolBar("Main Toolbar")
+    
+
+        # ----- Dropdown Menu for Visualization -----
+        # Add label for registration method dropdown
+        reg_method_label = QtWidgets.QLabel("Registration Method:", self)
+        reg_method_label.setContentsMargins(10, 0, 5, 0)  # Left, Top, Right, Bottom margins
+        toolbar.addWidget(reg_method_label)
+        
+        self.coreg_dropdown = QtWidgets.QComboBox(self)
+        self.coreg_dropdown.addItem("Fourier")
+        self.coreg_dropdown.addItem("Point Matching")
+        self.coreg_dropdown.addItem("ILK Optical Flow")
+        self.coreg_dropdown.addItem("TVL1 Optical Flow")
+        #self.coreg_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
+        toolbar.addWidget(self.coreg_dropdown)
+
         compute_shift_action = QtWidgets.QAction("Compute and Apply Shift", self)
         compute_shift_action.triggered.connect(self.compute_and_apply_shift)
         toolbar.addAction(compute_shift_action)
+
+         # Add after other toolbar items
+        apply_best_shift_action = QtWidgets.QAction("Apply Best Shift", self)
+        apply_best_shift_action.triggered.connect(self.apply_best_shift)
+        toolbar.addAction(apply_best_shift_action)
+
+
 
         # ----- Dropdown Menu for Visualization -----
         self.layer_dropdown = QtWidgets.QComboBox(self)
@@ -90,11 +113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.layer_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
         toolbar.addWidget(self.layer_dropdown)
 
-        # Add after other toolbar items
-        apply_best_shift_action = QtWidgets.QAction("Apply Best Shift", self)
-        apply_best_shift_action.triggered.connect(self.apply_best_shift)
-        toolbar.addAction(apply_best_shift_action)
-
+       
         # Add after other toolbar items
         clear_history_action = QtWidgets.QAction("Clear History", self)
         clear_history_action.triggered.connect(self.reset_history)
@@ -573,10 +592,10 @@ class MainWindow(QtWidgets.QMainWindow):
         shifted_mask = ndi_shift(
             self.template_mask_array.astype(float),
             shift=(total_shift_y, total_shift_x),
-            mode='constant',
-            order=0  # Nearest-neighbor for masks
+            mode='nearest',
+            order=3  # Nearest-neighbor for masks
         )
-        shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
+        #shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
         shifted_mask.flags.writeable = False
 
         return shifted_image, shifted_mask
@@ -709,8 +728,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                          shifted_template,
                                          self.ref_mask_array,
                                          shifted_template_mask,
-                                         self.perceptual_loss_model.hardware,
-                                         False)
+                                         self.perceptual_loss_model.hardware)
         return pl, diff_features
 
     def compute_and_apply_shift(self):
@@ -732,8 +750,21 @@ class MainWindow(QtWidgets.QMainWindow):
             shifted_image = self.template_image_array
             shifted_mask = self.template_mask_array
 
+        
+        selected_choice = self.coreg_dropdown.currentText()
+        if selected_choice == "Fourier":
+            shift_yx = ppi.compute_shift_pcc(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+        elif selected_choice == "Point Matching":
+            shift_yx = ppi.compute_shift_point_matching(self.ref_image_array, shifted_image)
+        elif selected_choice == "ILK Optical Flow":
+            shift_yx = ppi.compute_shift_ilk_optical_flow(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+        elif selected_choice == "TVL1 Optical Flow":
+            shift_yx = ppi.compute_shift_tvl1_optical_flow(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+        else:
+            shift_yx = [0, 0]
+
         # Step 2: Compute the new shift using phase_cross_correlation
-        shift_yx = ppi.compute_shift(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+        #shift_yx = ppi.compute_shift(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
       
         # Step 3: Add the computed shift to the current shift values
         new_shift_x = self.config["current_deltax"] + shift_yx[1]
@@ -801,7 +832,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Compute the sum of all layers in diff_features dictionary.
         This is used to visualize the sum of all layers in VGG feature space.
         """
-        summed_activations = ppi.compute_sum_of_layers(self.diff_features, normalize=True)
+        summed_activations = ppi.compute_sum_of_layers(self.diff_features, normalize=False)
 
         return summed_activations
 
