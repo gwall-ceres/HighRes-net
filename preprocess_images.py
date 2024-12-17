@@ -1,11 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage import io, transform
+from skimage import io, transform, img_as_float, exposure
 from skimage.metrics import structural_similarity as ssim
+from skimage.measure import ransac
+from skimage.transform import SimilarityTransform
+from skimage.feature import ORB, match_descriptors
 from skimage.registration import phase_cross_correlation
-from skimage import exposure
 from scipy.ndimage import shift as ndi_shift
-from skimage.transform import resize
 from torchvision import transforms, models
 import torch
 import torch.nn.functional as F
@@ -13,8 +14,6 @@ import os
 import random
 import json
 import time
-import torch
-import torchvision.models as models
 from torchvision.models import VGG19_Weights
 
 
@@ -51,6 +50,79 @@ def init_VGG_for_perceptual_loss():
 
     return feature_extractor
 
+
+def align_images_point_matching_skimage_shift(image1, image2, n_keypoints=500, match_threshold=0.75, ransac_threshold=2):
+    """
+    Aligns two images using point matching to estimate a subpixel shift.
+
+    Parameters:
+    - image1: Reference image (numpy array).
+    - image2: Image to be aligned (numpy array).
+    - n_keypoints: Number of keypoints to detect.
+    - match_threshold: Threshold for Lowe's ratio test (not directly used here).
+    - ransac_threshold: RANSAC inlier threshold in pixels.
+
+    Returns:
+    - aligned_image: Aligned version of image2.
+    - shift: Estimated (y, x) shift.
+    """
+    # Convert images to floating point
+    image1 = img_as_float(image1)
+    image2 = img_as_float(image2)
+
+    # Initialize ORB detector
+    orb = ORB(n_keypoints=n_keypoints, fast_threshold=0.05)
+
+    # Detect and extract features from image1
+    orb.detect_and_extract(image1)
+    keypoints1 = orb.keypoints
+    descriptors1 = orb.descriptors
+
+    # Detect and extract features from image2
+    orb.detect_and_extract(image2)
+    keypoints2 = orb.keypoints
+    descriptors2 = orb.descriptors
+
+    # Match descriptors using mutual nearest neighbors
+    matches12 = match_descriptors(descriptors1, descriptors2, cross_check=True)
+
+    if len(matches12) < 4:
+        raise ValueError("Not enough matches found for reliable alignment.")
+
+    # Extract matched keypoints
+    src = keypoints1[matches12[:, 0]][:, ::-1]  # (x, y)
+    dst = keypoints2[matches12[:, 1]][:, ::-1]  # (x, y)
+
+    # Estimate translation using RANSAC
+    # Define a transformation model: translation only
+    model = SimilarityTransform(scale=1, rotation=0, translation=(0, 0))
+    try:
+        model_robust, inliers = ransac((src, dst),
+                                       SimilarityTransform,
+                                       min_samples=2,
+                                       residual_threshold=ransac_threshold,
+                                       max_trials=1000)
+    except Exception as e:
+        raise ValueError(f"RANSAC failed to find a robust model: {e}")
+
+    if model_robust is None:
+        raise ValueError("RANSAC failed to find a robust model.")
+
+    # Extract translation
+    estimated_translation = model_robust.translation  # (tx, ty)
+
+    # Since SimilarityTransform includes both x and y translations,
+    # and we set rotation=0 and scale=1, we can directly use the translation components.
+    shift_x, shift_y = estimated_translation  # (x_shift, y_shift)
+
+    # Apply the estimated shift using scipy.ndimage.shift
+    # Note: shift expects (y, x) order
+    aligned_image = ndi_shift(image2, shift=(-shift_y, -shift_x), mode='nearest', order=3)
+
+    # The total estimated shift is (y, x)
+    shift = (shift_y, shift_x)
+
+    return aligned_image, shift
 
 
 def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu', debug=False):
@@ -100,7 +172,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     valid_pixels = np.sum(combined_mask)
     perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
 
-    print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
+    #print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
 
     # Zero out invalid pixels according to the combined mask
     ref_image_rgb[~combined_mask] = 0
@@ -130,7 +202,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     # If the model returns a dictionary, ensure consistent ordering
     if isinstance(ref_features, dict):
         feature_names = sorted(ref_features.keys())
-        print(f"feature_names = {feature_names}")
+        #print(f"feature_names = {feature_names}")
         ref_features = [ref_features[name] for name in feature_names]
         mov_features = [mov_features[name] for name in feature_names]
     elif isinstance(ref_features, list) or isinstance(ref_features, tuple):
@@ -170,15 +242,15 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
 
         # Calculate total number of valid activations (channels * spatial dimensions * mask)
         num_valid_activations = torch.sum(mask_expanded)  # This gives us valid spatial positions * channels
-        print(f"num_valid_activations = {num_valid_activations}")
+        #print(f"num_valid_activations = {num_valid_activations}")
         
         # Compute the Mean L1 Error between the masked feature maps
         l1_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid_activations
         l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)  # Element-wise differences
         #sum over the channels
         l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid_activations  # sum over the channels, then squeeze to remove the extra dimension
-        l1_loss2 = l1_diff_summed.sum() #/ num_valid_activations
-        print(f"perc loss -> l1_loss = {l1_loss}, l1_loss2 = {l1_loss2}")
+        l1_loss2 = l1_diff_summed.sum() 
+        #print(f"perc loss -> l1_loss = {l1_loss}, l1_loss2 = {l1_loss2}")
         diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()  # Save the l1 differences
     
         # Accumulate the loss
@@ -235,7 +307,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     torch.cuda.synchronize()
     end = time.time()
     #print(f"***total time to compute the perceptual loss = {end - start}***")
-    total_loss = total_loss / len(ref_features) #average over the layers
+    #total_loss = total_loss / len(ref_features) #average over the layers
     print(f"***perceptual loss = {total_loss}***")
     return total_loss, diff_features
 

@@ -1,17 +1,24 @@
 # registration_app.py
+'''
+Next steps
+implement more similarity metrics: mutual information, cross correlation
+then implement several more methods for estimating
 
+'''
 import sys
 import logging
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap  # Directly import QPixmap
 import numpy as np
+from skimage import io, transform
 from scipy.ndimage import shift as ndi_shift
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import registration_helpers as rh
 import preprocess_images as ppi
 from heatmap_canvas import HeatmapCanvas
+
 
 # Corrected logging configuration to suppress DEBUG messages
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -69,10 +76,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.layer_dropdown.addItem("Layer 10 (Conv3)")
         self.layer_dropdown.addItem("Layer 19 (Conv4)")
         self.layer_dropdown.addItem("Layer 28 (Conv5)")
+        self.layer_dropdown.addItem("Sum of Layers")
 
         self.layer_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
         toolbar.addWidget(self.layer_dropdown)
 
+        # Add after other toolbar items
+        apply_best_shift_action = QtWidgets.QAction("Apply Best Shift", self)
+        apply_best_shift_action.triggered.connect(self.apply_best_shift)
+        toolbar.addAction(apply_best_shift_action)
 
         # ----- Central Widget and Grid Layout -----
         central_widget = QtWidgets.QWidget()
@@ -201,6 +213,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_history = []
         self.shift_x_history = []
         self.shift_y_history = []
+
+        self.best_shift_x = 0.0
+        self.best_shift_y = 0.0
+        self.best_perceptual_loss = float('inf')
         
 
         # ----- Initialize Plots -----
@@ -216,6 +232,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.config["template_mask"]:
             self.load_image_from_path("template_mask", self.config["template_mask"])
 
+    def reset_history(self):
+        self.mse_history = []
+        self.pl_history = []
+        self.shift_x_history = []
+        self.shift_y_history = []
 
     def initialize_plots(self):
         """
@@ -249,6 +270,52 @@ class MainWindow(QtWidgets.QMainWindow):
         if fname:
             self.load_image_from_path(image_type, fname)
 
+    #scale the reference image to match the template image
+    def align_image_sizes(self):
+        if self.ref_image_array is None or self.template_image_array is None:
+            return
+
+        if self.ref_image_array.shape != self.template_image_array.shape:
+            # Get template dimensions
+            template_height, template_width = self.template_image_array.shape
+        
+            # Resize reference image using Lanczos interpolation
+            resized_ref = transform.resize(
+                self.ref_image_array,
+                (template_height, template_width),
+                order=4,  # Lanczos interpolation
+                mode='reflect',
+                anti_aliasing=True,
+                preserve_range=True
+            ).astype(np.float32)
+            
+            self.ref_image_array = resized_ref
+            self.ref_image_array.flags.writeable = False
+
+
+    #scale the reference mask to match the template mask
+    def align_mask_sizes(self):
+        if self.ref_mask_array is None or self.template_mask_array is None:
+            return
+
+        if self.ref_mask_array.shape != self.template_mask_array.shape:
+            # Get template dimensions
+            template_height, template_width = self.template_mask_array.shape
+        
+            # Resize reference image using Lanczos interpolation
+            resized_mask = transform.resize(
+                self.ref_mask_array.astype(float),
+                (template_height, template_width),
+                order=0,  # Nearest-neighbor interpolation
+                mode='constant',
+                preserve_range=True
+            )
+            resized_mask = resized_mask > 0.5  
+            
+            self.ref_mask_array = resized_mask
+            self.ref_mask_array.flags.writeable = False
+
+
     def load_image_from_path(self, image_type, filepath):
         """
         Load an image or mask from the given filepath, store the original NumPy array,
@@ -263,20 +330,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ref_image_array = arr.astype(np.float32)  # Store original
             self.ref_image_array.flags.writeable = False
             display_arr = ppi.contrast_stretch_8bit(self.ref_image_array)  # Apply contrast stretching for display
-            self.ref_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
+            #self.ref_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
+            self.align_image_sizes()
         elif image_type == "template_image":
             self.template_image_array = arr.astype(np.float32)  # Store original
             self.template_image_array.flags.writeable = False
             display_arr = ppi.contrast_stretch_8bit(self.template_image_array)  # Apply contrast stretching for display
-            self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
+            #self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
+            self.align_image_sizes()
         elif image_type == "reference_mask":
             self.ref_mask_array = arr.astype(bool)  # Store original mask without contrast stretching
             self.ref_mask_array.flags.writeable = False
-            self.ref_mask_pixmap = self.array_to_qpixmap(self.ref_mask_array, is_grayscale=True)
+            #self.ref_mask_pixmap = self.array_to_qpixmap(self.ref_mask_array, is_grayscale=True)
+            self.align_mask_sizes()
         elif image_type == "template_mask":
             self.template_mask_array = arr.astype(bool)  # Store original mask without contrast stretching
             self.template_mask_array.flags.writeable = False
-            self.template_mask_pixmap = self.array_to_qpixmap(self.template_mask_array, is_grayscale=True)
+            #self.template_mask_pixmap = self.array_to_qpixmap(self.template_mask_array, is_grayscale=True)
+            self.align_mask_sizes()
         else:
             logging.warning(f"Unknown image type: {image_type}")
             return
@@ -300,7 +371,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                                    "Reference mask dimensions do not match Template mask dimensions.")
                     logging.error("Reference mask dimensions do not match Template mask dimensions.")
                     return
-
+                    
+        self.reset_history()
         # Update the overlay only if both reference and template images are loaded
         if image_type in ["reference_image", "template_image"] and self.ref_image_array is not None and self.template_image_array is not None:
             self.update_overlay(self.template_image_array)
@@ -424,8 +496,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Update the shift fields
-        self.deltaX_edit.setText(str(self.config["current_deltax"]))
-        self.deltaY_edit.setText(str(self.config["current_deltay"]))
+        self.deltaX_edit.setText(f"{self.config['current_deltax']:.5f}")
+        self.deltaY_edit.setText(f"{self.config['current_deltay']:.5f}")
         # logging.debug("Updated Delta X and Delta Y QLineEdits.")
 
         # Apply the shift to the template image and update the overlay
@@ -565,6 +637,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compute_and_display_heatmap(shifted_image, shifted_mask)
         # logging.debug("Computed and displayed difference heatmap.")
 
+    def apply_best_shift(self):
+        """
+        Apply the shift that resulted in the best (lowest) perceptual loss seen so far.
+        """
+        if len(self.pl_history) == 0:
+            QtWidgets.QMessageBox.warning(self, "No History", 
+                                        "No shifts have been applied yet.")
+            return
+
+        # Find the index of the minimum perceptual loss
+        best_idx = np.argmin(self.pl_history)
+        best_shift_x = self.shift_x_history[best_idx]
+        best_shift_y = self.shift_y_history[best_idx]
+        best_pl = self.pl_history[best_idx]
+
+        print(f"Applying best shift: X={best_shift_x}, Y={best_shift_y} (PL={best_pl})")
+
+        # Update the current shifts
+        self.config["current_deltax"] = best_shift_x
+        self.config["current_deltay"] = best_shift_y
+
+        # Update the shift fields
+        self.deltaX_edit.setText(f"{best_shift_x:.5f}")
+        self.deltaY_edit.setText(f"{best_shift_y:.5f}")
+
+        # Apply the shift and update the display
+        self.apply_shift_and_update_overlay()
+
+
     def compute_mse(self, shifted_template, shifted_template_mask):
         """
         Compute Mean Squared Error between reference and shifted template images.
@@ -620,8 +721,8 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"New shift: X={new_shift_x}, Y={new_shift_y}")
 
         # Update the shift fields at the top of the interface
-        self.deltaX_edit.setText(str(self.config["current_deltax"]))
-        self.deltaY_edit.setText(str(self.config["current_deltay"]))
+        self.deltaX_edit.setText(f"{self.config['current_deltax']:.5f}")
+        self.deltaY_edit.setText(f"{self.config['current_deltay']:.5f}")
 
         # Step 4: Apply the new shift and update all displays
         self.apply_shift_and_update_overlay()
@@ -671,6 +772,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mse_canvas.draw()
         self.pl_canvas.draw()
 
+    def compute_sum_of_layers(self):
+        if self.diff_features is None:
+            return np.zeros((10,10), dtype=float)
+        
+        # Find the largest dimensions among all layers
+        max_height = 0
+        max_width = 0
+        for layer in self.diff_features:
+            activations = self.diff_features[layer]
+            height, width = activations.shape
+            max_height = max(max_height, height)
+            max_width = max(max_width, width)
+        
+        # Create array to store the sum of all layers
+        summed_activations = np.zeros((max_height, max_width))
+        
+        # Add each normalized layer to the sum
+        for layer in self.diff_features:
+            activations = self.diff_features[layer]
+            
+            # Normalize the activations to [0,1] range
+            layer_max = np.max(np.abs(activations))
+            if layer_max > 0:  # Avoid division by zero
+                normalized_activations = activations / layer_max
+            else:
+                normalized_activations = activations
+                
+            # Scale to largest dimensions if necessary
+            if normalized_activations.shape != (max_height, max_width):
+                scaled_activations = transform.resize(
+                    normalized_activations,
+                    (max_height, max_width),
+                    order=3,  # Cubic interpolation
+                    mode='reflect',
+                    anti_aliasing=True,
+                    preserve_range=True
+                )
+            else:
+                scaled_activations = normalized_activations
+                
+            # Add to sum
+            summed_activations += scaled_activations
+        
+        # Optionally normalize the final sum to [0,1] range
+        final_max = np.max(np.abs(summed_activations))
+        if final_max > 0:
+            summed_activations /= final_max
+            
+        return summed_activations
+
     def compute_and_display_heatmap(self, shifted_template_image, shifted_template_mask):
         #print(f"compute_and_display_heatmap")
         """
@@ -683,6 +834,9 @@ class MainWindow(QtWidgets.QMainWindow):
         selected_choice = self.layer_dropdown.currentText()
         if selected_choice == "Heatmap":
             self.compute_difference_heatmap(shifted_template_image, shifted_template_mask)
+        elif selected_choice == "Sum of Layers":
+            summed_activations = self.compute_sum_of_layers()
+            self.heatmap_canvas.plot_heatmap(summed_activations, mask=None, cmap='jet')
         else:
             selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
             #print(f"selected_layer = {selected_layer}")
@@ -752,6 +906,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if selected_choice == "Heatmap":
             pass
             #self.compute_and_display_heatmap(self.shifted_template_image, self.shifted_template_mask)
+        elif selected_choice == "Sum of Layers":
+            summed_activations = self.compute_sum_of_layers()
+            self.heatmap_canvas.plot_heatmap(summed_activations, mask=None, cmap='jet') 
         else:
             selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
             #print(f"selected_layer = {selected_layer}")
