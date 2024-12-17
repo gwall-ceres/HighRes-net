@@ -1,16 +1,12 @@
 # registration_app.py
 '''
 Next steps
-implement more similarity metrics: mutual information, cross correlation, L1 loss
-https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.normalized_mutual_information
-https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.normalized_cross_correlation
-https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.structural_similarity
-https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics    
 then implement several more methods for estimating the shift
 skimage.registration.optical_flow_tvl1
 skimage.registration.optical_flow_ilk
 
-we need to 
+Look into other methods of estimating subpixel shifts.
+See if SIFT works better than ORB.
 
 '''
 import sys
@@ -19,7 +15,7 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap  # Directly import QPixmap
 import numpy as np
-from skimage import io, transform
+from skimage import io, transform, color
 from scipy.ndimage import shift as ndi_shift
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -175,12 +171,37 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Image Display Layout -----
         images_layout = QtWidgets.QHBoxLayout()
 
+        # Create a vertical layout for overlay controls and image
+        overlay_layout = QtWidgets.QVBoxLayout()
+        
+        # Add dropdown for overlay type
+        overlay_type_layout = QtWidgets.QHBoxLayout()
+        overlay_type_label = QtWidgets.QLabel("Overlay Type:")
+        self.overlay_type_dropdown = QtWidgets.QComboBox()
+        self.overlay_type_dropdown.addItems([
+            "Red-Cyan",
+            "Template Only",
+            "Template Mask",
+            "Reference Only",
+            "Reference Mask",
+            "Side by Side",
+            "Checkerboard",
+            "Difference Blend",
+            "HSV Difference"
+        ])
+        self.overlay_type_dropdown.currentIndexChanged.connect(self.handle_overlay_change)
+        overlay_type_layout.addWidget(overlay_type_label)
+        overlay_type_layout.addWidget(self.overlay_type_dropdown)
+        overlay_layout.addLayout(overlay_type_layout)
+
         # Placeholder for reference+template overlay image
         self.overlay_image_label = QtWidgets.QLabel("Overlay Image Here")
         self.overlay_image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.overlay_image_label.setStyleSheet("border: 1px solid gray;")
-        self.overlay_image_label.setScaledContents(True)  # Ensure the image scales within the label
-        images_layout.addWidget(self.overlay_image_label)
+        self.overlay_image_label.setScaledContents(True)
+        overlay_layout.addWidget(self.overlay_image_label)
+
+        images_layout.addLayout(overlay_layout)
 
         # HeatmapCanvas for the difference heatmap
         self.heatmap_canvas = HeatmapCanvas(self, width=5, height=4, dpi=100)
@@ -232,7 +253,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ref_display_pixmap = None  # Display Reference Image (Contrast Stretched)
 
         self.template_image_array = None  # Original Template Image (Grayscale)
-        self.template_display_pixmap = None  # Display Template Image (Contrast Stretched)
+        #self.template_display_pixmap = None  # Display Template Image (Contrast Stretched)
 
         self.ref_mask_array = None  # Original Reference Mask (Grayscale)
         self.ref_mask_pixmap = None
@@ -351,12 +372,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def align_mask_sizes(self):
         if self.ref_mask_array is None or self.template_mask_array is None:
             return
-
+        
+        self.ref_mask_orig = self.ref_mask_array
         if self.ref_mask_array.shape != self.template_mask_array.shape:
             # Get template dimensions
             template_height, template_width = self.template_mask_array.shape
         
-            # Resize reference image using Lanczos interpolation
+            
             resized_mask = transform.resize(
                 self.ref_mask_array.astype(float),
                 (template_height, template_width),
@@ -383,13 +405,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_type == "reference_image":
             self.ref_image_array = arr.astype(np.float32)  # Store original
             self.ref_image_array.flags.writeable = False
-            display_arr = ppi.contrast_stretch_8bit(self.ref_image_array)  # Apply contrast stretching for display
+            #display_arr = ppi.contrast_stretch_8bit(self.ref_image_array, self.ref_mask_array)  # Apply contrast stretching for display
             #self.ref_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
             self.align_image_sizes()
         elif image_type == "template_image":
             self.template_image_array = arr.astype(np.float32)  # Store original
             self.template_image_array.flags.writeable = False
-            display_arr = ppi.contrast_stretch_8bit(self.template_image_array)  # Apply contrast stretching for display
+            #display_arr = ppi.contrast_stretch_8bit(self.template_image_array)  # Apply contrast stretching for display
             #self.template_display_pixmap = self.array_to_qpixmap(display_arr, is_grayscale=True)
             self.align_image_sizes()
         elif image_type == "reference_mask":
@@ -429,7 +451,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_history()
         # Update the overlay only if both reference and template images are loaded
         if image_type in ["reference_image", "template_image"] and self.ref_image_array is not None and self.template_image_array is not None:
-            self.update_overlay(self.template_image_array)
+            self.update_overlay(self.template_image_array, self.template_mask_array)
 
 
     def array_to_qpixmap(self, array, is_grayscale):
@@ -466,7 +488,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return QPixmap()
 
 
-    def update_overlay(self, shifted_template_image):
+    def update_overlay(self, shifted_template_image, shifted_template_mask):
         """
         Update the overlay image based on the current reference and shifted template image arrays,
         applying contrast stretching to brighten the display.
@@ -474,46 +496,138 @@ class MainWindow(QtWidgets.QMainWindow):
         Args:
             shifted_template_image (np.ndarray): Shifted template image array.
         """
-        if self.ref_image_array is None or shifted_template_image is None:
+        if self.ref_image_array is None or shifted_template_image is None or shifted_template_mask is None:
             self.overlay_image_label.setText("Overlay Image Here")
-            # logging.debug("Overlay not updated: Reference or Shifted Template image array is None.")
             return
 
         # Apply contrast stretching to both arrays
-        ref_enhanced = ppi.contrast_stretch_8bit(self.ref_image_orig)
-            #self.ref_image_array)
-        template_enhanced = ppi.contrast_stretch_8bit(shifted_template_image)
-        # Resize reference image using Lanczos interpolation
+        ref_enhanced = ppi.contrast_stretch_8bit(self.ref_image_array)
+        template_enhanced = ppi.contrast_stretch_8bit(shifted_template_image, shifted_template_mask)
+        '''
         template_enhanced = transform.resize(
-                template_enhanced,
-                ref_enhanced.shape,
-                order=4,  # Lanczos interpolation
-                mode='reflect',
-                anti_aliasing=True,
-                preserve_range=True
-            ).astype(np.float32)
+            template_enhanced,
+            ref_enhanced.shape,
+            order=4,
+            mode='constant',
+            cval=0,
+            anti_aliasing=True,
+            preserve_range=True
+        ).astype(np.float32)
+        '''
 
-        # Create a 3-channel RGB overlay using the enhanced arrays
-        overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
-        overlay_array[:, :, 0] = template_enhanced       # Red channel (Template Image)
-        overlay_array[:, :, 1] = ref_enhanced           # Green channel (Reference Image)
-        overlay_array[:, :, 2] = ref_enhanced           # Blue channel (Reference Image), creating cyan
+        overlay_type = self.overlay_type_dropdown.currentText()
+        
+        if overlay_type == "Red-Cyan":
+            # Create RGB overlay (Red for template, Cyan for reference)
+            overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
+            overlay_array[:, :, 0] = template_enhanced  # Red channel (Template)
+            overlay_array[:, :, 1] = ref_enhanced      # Green channel (Reference)
+            overlay_array[:, :, 2] = ref_enhanced      # Blue channel (Reference)
+        
+        elif overlay_type == "Template Only":
+            # Show only the template image (properly handled as grayscale)
+            template_uint8 = template_enhanced.astype(np.uint8)
+            overlay_array = np.stack([template_uint8] * 3, axis=-1)
+
+        elif overlay_type == "Template Mask":
+            # Show only the template mask (properly scaled to 0-255)
+            mask_uint8 = (shifted_template_mask * 255).astype(np.uint8)
+            overlay_array = np.stack([mask_uint8] * 3, axis=-1)
+        
+        elif overlay_type == "Reference Only":
+            # Show only the reference image
+            overlay_array = np.stack([ref_enhanced] * 3, axis=-1)
+
+        elif overlay_type == "Reference Mask":
+            # Show only the reference mask
+            mask_uint8 = (self.ref_mask_array * 255).astype(np.uint8)
+            overlay_array = np.stack([mask_uint8] * 3, axis=-1)
+        
+        elif overlay_type == "Side by Side":
+            # Create side-by-side comparison
+            half_width = ref_enhanced.shape[1] // 2
+            overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
+            overlay_array[:, :half_width] = np.stack([ref_enhanced[:, :half_width]] * 3, axis=-1)
+            overlay_array[:, half_width:] = np.stack([template_enhanced[:, half_width:]] * 3, axis=-1)
+        
+        elif overlay_type == "Checkerboard":
+            # Create checkerboard pattern
+            checker_size = 50  # Size of each checker square
+            x, y = np.indices(ref_enhanced.shape)
+            checker_pattern = ((x // checker_size) + (y // checker_size)) % 2
+            overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
+            overlay_array[checker_pattern == 0] = np.stack([ref_enhanced[checker_pattern == 0]] * 3, axis=-1)
+            overlay_array[checker_pattern == 1] = np.stack([template_enhanced[checker_pattern == 1]] * 3, axis=-1)
+
+        elif overlay_type == "Difference Blend":
+            # Create RGB array for overlay
+            overlay_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=np.uint8)
+            combined_mask = self.ref_mask_array.astype(float) * shifted_template_mask
+            # Calculate absolute difference between enhanced images
+            diff = np.abs(ref_enhanced.astype(float) - template_enhanced.astype(float)) * combined_mask
+            diff = (diff / diff.max() * 255).astype(np.uint8)  # Normalize to 0-255 range
+            
+            # Create base grayscale image (average of enhanced images)
+            base = ((ref_enhanced.astype(float) + template_enhanced.astype(float)) / 2).astype(np.uint8)
+            
+            # Apply base grayscale to all channels
+            overlay_array[..., 0] = base  # R
+            overlay_array[..., 1] = base  # G
+            overlay_array[..., 2] = base  # B
+            
+            # Calculate red boost and green/blue reduction with bounds checking
+            red_channel = overlay_array[..., 0].astype(np.int16) + diff  # Use int16 to prevent overflow
+            green_blue_reduction = diff // 2
+            green_channel = overlay_array[..., 1].astype(np.int16) - green_blue_reduction
+            blue_channel = overlay_array[..., 2].astype(np.int16) - green_blue_reduction
+            
+            # Clip values to valid range and assign back to overlay array
+            overlay_array[..., 0] = np.clip(red_channel, 0, 255).astype(np.uint8)
+            overlay_array[..., 1] = np.clip(green_channel, 0, 255).astype(np.uint8)
+            overlay_array[..., 2] = np.clip(blue_channel, 0, 255).astype(np.uint8)
+
+        elif overlay_type == "HSV Difference":
+            # Create HSV array (using float for calculations)
+            hsv_array = np.zeros((ref_enhanced.shape[0], ref_enhanced.shape[1], 3), dtype=float)
+            combined_mask = self.ref_mask_array.astype(float) * shifted_template_mask
+
+            # Calculate absolute difference between enhanced images
+            diff = np.abs(ref_enhanced.astype(float) - template_enhanced.astype(float)) * combined_mask
+            #diff_normalized = diff / diff.max()  # Normalize to 0-1 range
+            bin_mask = combined_mask > 0.5
+            p1, p99 = np.percentile(diff[bin_mask], (0.5, 99.5))
+            diff_normalized = np.clip((diff - p1) / (p99 - p1), 0, 1)
+            
+            # Set Value/Luminance to reference image (normalized to 0-1)
+            hsv_array[..., 2] = ref_enhanced.astype(float) / 255.0
+            
+            # Set Hue based on difference (0.66 for blue to 0 for red)
+            # Small differences -> blue (0.66)
+            # Large differences -> red (0)
+            hsv_array[..., 0] = 0.66 * (1 - diff_normalized)
+            
+            # Set Saturation based on difference
+            # No difference -> no saturation (grayscale)
+            # Large difference -> full saturation (colorful)
+            hsv_array[..., 1] = diff_normalized
+            
+            # Convert HSV to RGB
+            rgb_array = np.clip(color.hsv2rgb(hsv_array) * 255, 0, 255).astype(np.uint8)
+            overlay_array = rgb_array
 
         # Convert the overlay array to QImage
         bytes_per_line = 3 * overlay_array.shape[1]
         overlay_qimage = QtGui.QImage(overlay_array.tobytes(), overlay_array.shape[1], overlay_array.shape[0],
-                                      bytes_per_line, QtGui.QImage.Format_RGB888)
+                                    bytes_per_line, QtGui.QImage.Format_RGB888)
 
         if overlay_qimage.isNull():
             logging.error("Failed to create QImage from overlay array.")
             self.overlay_image_label.setText("Overlay Creation Failed")
             return
 
-        # Convert QImage to QPixmap
+        # Convert QImage to QPixmap and display
         overlay_pixmap = QPixmap.fromImage(overlay_qimage)
-        # Set the pixmap directly without manual scaling
         self.overlay_image_label.setPixmap(overlay_pixmap)
-        # logging.debug("Set overlay pixmap to QLabel.")
 
     def resizeEvent(self, event):
         """
@@ -521,7 +635,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         super(MainWindow, self).resizeEvent(event)
         if self.template_image_array is not None:
-            self.update_overlay(self.template_image_array)
+            self.update_overlay(self.template_image_array, self.template_mask_array)
         if self.heatmap_canvas:
             self.heatmap_canvas.draw()
         # logging.debug("Handled window resize event and updated overlay.")
@@ -614,7 +728,8 @@ class MainWindow(QtWidgets.QMainWindow):
         shifted_image = ndi_shift(
             self.template_image_array,
             shift=(total_shift_y, total_shift_x),
-            mode='reflect',
+            mode='constant',
+            cval=0,
             order=3  # Cubic interpolation for images
         )
         shifted_image.flags.writeable = False
@@ -624,8 +739,9 @@ class MainWindow(QtWidgets.QMainWindow):
         shifted_mask = ndi_shift(
             self.template_mask_array.astype(float),
             shift=(total_shift_y, total_shift_x),
-            mode='nearest',
-            order=3  # Nearest-neighbor for masks
+            mode='constant',
+            order=3,
+            cval=0
         )
         #shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
         shifted_mask.flags.writeable = False
@@ -700,12 +816,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # logging.debug("Applied shift to template mask and re-binarized.")
 
         # Update the display pixmap with the shifted image
-        shifted_display_arr = ppi.contrast_stretch_8bit(shifted_image)  # Apply contrast stretching for display
-        self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
+        #shifted_display_arr = ppi.contrast_stretch_8bit(shifted_image)  # Apply contrast stretching for display
+        #self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
         # logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
 
         # Update the overlay
-        self.update_overlay(shifted_image)
+        self.update_overlay(shifted_image, shifted_mask)
         # logging.debug("Updated overlay after shifting.")
 
         # Compute Losses
@@ -1049,6 +1165,20 @@ class MainWindow(QtWidgets.QMainWindow):
         
           
     
+    def handle_overlay_change(self):
+        """
+        Wrapper function to handle overlay type changes and call update_overlay with correct arguments.
+        """
+        if hasattr(self, 'template_image_array') and self.template_image_array is not None:
+            # Get the current shifts
+            total_shift_x = self.config["current_deltax"]
+            total_shift_y = self.config["current_deltay"]
+            
+            # Apply current shift to get shifted template
+            shifted_image, shifted_mask = self.apply_shift_to_template(total_shift_x, total_shift_y)
+            
+            # Update the overlay with shifted template
+            self.update_overlay(shifted_image, shifted_mask)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
