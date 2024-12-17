@@ -27,6 +27,9 @@ import registration_helpers as rh
 import preprocess_images as ppi
 from heatmap_canvas import HeatmapCanvas
 from VGGFeatureExtractor import VGGFeatureExtractor
+# Add these imports at the top
+from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import normalized_mutual_information as nmi
 
 
 # Corrected logging configuration to suppress DEBUG messages
@@ -208,7 +211,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_ylabel("Perceptual Loss")
         graphs_layout.addWidget(self.pl_canvas)
 
-        # Add graphs layout to grid
+        #Add new figure/canvas for combined metrics
+        self.metrics_fig = Figure(figsize=(4, 3))
+        self.metrics_canvas = FigureCanvas(self.metrics_fig)
+        self.metrics_ax = self.metrics_fig.add_subplot(111)
+        self.metrics_ax.set_title("Registration Metrics")
+        graphs_layout.addWidget(self.metrics_canvas)
+    # Add graphs layout to grid
         grid_layout.addLayout(graphs_layout, 3, 0, 1, 2)  # Span across 2 columns
 
         # Set stretch factors for rows and columns
@@ -245,6 +254,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Initialize Loss Histories -----
         self.ml1e_history = []
         self.pl_history = []
+        self.ssim_history = []
+        self.nmi_history = []
+        self.ncc_history = []
         self.shift_x_history = []
         self.shift_y_history = []
 
@@ -269,8 +281,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def reset_history(self):
         self.ml1e_history = []
         self.pl_history = []
+        self.ssim_history = []
+        self.nmi_history = []
+        self.ncc_history = []
         self.shift_x_history = []
         self.shift_y_history = []
+
+        # Clear the plots before updating
+        self.ml1e_ax.clear()
+        self.pl_ax.clear()
+        self.metrics_ax.clear()
 
     def initialize_plots(self):
         """
@@ -411,6 +431,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if image_type in ["reference_image", "template_image"] and self.ref_image_array is not None and self.template_image_array is not None:
             self.update_overlay(self.template_image_array)
 
+
     def array_to_qpixmap(self, array, is_grayscale):
         """
         Convert a NumPy array to QPixmap for display.
@@ -443,6 +464,7 @@ class MainWindow(QtWidgets.QMainWindow):
             logging.error(f"Failed to convert array to QPixmap: {e}")
             QtWidgets.QMessageBox.critical(self, "Image Conversion Error", f"Failed to convert image for display: {e}")
             return QPixmap()
+
 
     def update_overlay(self, shifted_template_image):
         """
@@ -525,8 +547,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Update the shift fields
-        self.deltaX_edit.setText(f"{self.config['current_deltax']:.5f}")
-        self.deltaY_edit.setText(f"{self.config['current_deltay']:.5f}")
+        self.deltaX_edit.setText(f"{self.config['current_deltax']:.3f}")
+        self.deltaY_edit.setText(f"{self.config['current_deltay']:.3f}")
         # logging.debug("Updated Delta X and Delta Y QLineEdits.")
 
         # Apply the shift to the template image and update the overlay
@@ -601,6 +623,34 @@ class MainWindow(QtWidgets.QMainWindow):
         return shifted_image, shifted_mask
            
 
+    # Add new method to compute metrics
+    def compute_registration_metrics(self, shifted_template, shifted_mask):
+        """
+        Compute various registration metrics between reference and shifted template images.
+        """
+        if self.ref_image_array is None or shifted_template is None:
+            return None, None, None
+
+        # Create combined mask
+        combined_mask = self.ref_mask_array * shifted_mask
+        
+        # Compute metrics only on masked regions
+        ref_masked = self.ref_image_array * combined_mask
+        template_masked = shifted_template * combined_mask
+
+        # Compute SSIM using original intensity values
+        ssim_val = ssim(ref_masked, template_masked, 
+                       data_range=ref_masked.max() - ref_masked.min())
+        
+        # Compute NMI using original intensity values
+        nmi_val = nmi(ref_masked, template_masked)
+        
+        # NCC typically benefits from normalization, so keep as is
+        ncc_val = ppi.compute_masked_ncc(self.ref_image_array, shifted_template, 
+                                         self.ref_mask_array, shifted_mask)
+
+        return ssim_val, nmi_val, ncc_val
+    
     def apply_shift_and_update_overlay(self):
         """
         Shift the template image and its mask based on current_deltax and current_deltay,
@@ -667,11 +717,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 activations = self.diff_features[selected_layer]
                 pl = np.sum(activations)
                 
-
         self.pl_history.append(pl)
 
-        # logging.debug("Appended ml1e and Perceptual Loss to histories.")
-
+        # After computing shifted_image and shifted_mask
+        ssim_val, nmi_val, ncc_val = self.compute_registration_metrics(shifted_image, shifted_mask)
+        print(f"ssim_val = {ssim_val}, nmi_val = {nmi_val}, ncc_val = {ncc_val}")
+        # Append to histories
+        self.ssim_history.append(ssim_val)
+        self.nmi_history.append(nmi_val)
+        self.ncc_history.append(ncc_val)
+    
         # Update plots
         self.update_plots()
         # logging.debug("Updated ml1e and Perceptual Loss plots.")
@@ -702,8 +757,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config["current_deltay"] = best_shift_y
 
         # Update the shift fields
-        self.deltaX_edit.setText(f"{best_shift_x:.5f}")
-        self.deltaY_edit.setText(f"{best_shift_y:.5f}")
+        self.deltaX_edit.setText(f"{best_shift_x:.3f}")
+        self.deltaY_edit.setText(f"{best_shift_y:.3f}")
 
         # Apply the shift and update the display
         self.apply_shift_and_update_overlay()
@@ -776,8 +831,8 @@ class MainWindow(QtWidgets.QMainWindow):
         print(f"New shift: X={new_shift_x}, Y={new_shift_y}")
 
         # Update the shift fields at the top of the interface
-        self.deltaX_edit.setText(f"{self.config['current_deltax']:.5f}")
-        self.deltaY_edit.setText(f"{self.config['current_deltay']:.5f}")
+        self.deltaX_edit.setText(f"{self.config['current_deltax']:.3f}")
+        self.deltaY_edit.setText(f"{self.config['current_deltay']:.3f}")
 
         # Step 4: Apply the new shift and update all displays
         self.apply_shift_and_update_overlay()
@@ -795,7 +850,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Clear the plots before updating
         self.ml1e_ax.clear()
         self.pl_ax.clear()
-
+        self.metrics_ax.clear()
+        
         # Plot ml1e over shifts
         self.ml1e_ax.set_title("ml1e over Shifts")
         self.ml1e_ax.set_ylabel("ml1e")
@@ -805,6 +861,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_title("Perceptual Loss over Shifts")
         self.pl_ax.set_ylabel("Perceptual Loss")
         self.pl_ax.plot(shift_steps, self.pl_history, 'b-')
+
+        # Normalize each metric to [0,1] range for comparison
+        def normalize_metric(metric_history):
+            '''
+            if not metric_history:
+                return []
+            min_val = min(metric_history)   
+            max_val = max(metric_history)
+            if max_val == min_val:
+                return [1.0] * len(metric_history)
+            return [(x - min_val) / (max_val - min_val) for x in metric_history]
+            '''
+            return metric_history
+
+        # Plot normalized metrics
+        if self.ssim_history:
+            self.metrics_ax.plot(shift_steps, normalize_metric(self.ssim_history), 'g-', label='SSIM')
+        if self.nmi_history:
+            self.metrics_ax.plot(shift_steps, normalize_metric(self.nmi_history), 'y-', label='NMI')
+        if self.ncc_history:
+            self.metrics_ax.plot(shift_steps, normalize_metric(self.ncc_history), 'm-', label='NCC')
 
         # Create x-axis labels showing the shifts
         x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history, self.shift_y_history)]
@@ -816,6 +893,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_xticks(shift_steps)
         self.pl_ax.set_xticklabels(x_labels, rotation=45, ha='right')
 
+        self.metrics_ax.set_xticks(shift_steps)
+        self.metrics_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        
+        self.metrics_ax.set_xlabel("Shifts (x, y)")
+        self.metrics_ax.set_ylabel("Normalized Metric Value")
+        self.metrics_ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+
         # Add a label explaining the format
         self.ml1e_ax.set_xlabel("Shifts (x, y)")
         self.pl_ax.set_xlabel("Shifts (x, y)")
@@ -823,10 +907,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Adjust layout to prevent label cutoff
         self.ml1e_fig.tight_layout()
         self.pl_fig.tight_layout()
+        # Adjust layout
+        self.metrics_fig.tight_layout()
 
         # Redraw the updated plots
         self.ml1e_canvas.draw()
         self.pl_canvas.draw()
+        self.metrics_canvas.draw()
 
 
     def compute_sum_of_layers(self):

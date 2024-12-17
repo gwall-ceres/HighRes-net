@@ -7,7 +7,7 @@ from skimage.transform import SimilarityTransform
 from skimage.feature import ORB, match_descriptors
 from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift as ndi_shift
-from torchvision import transforms, models
+from torchvision import transforms
 import torch
 import torch.nn.functional as F
 import os
@@ -172,6 +172,47 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     total_loss = total_loss / len(ref_features) #average over the layers
     print(f"***perceptual loss = {total_loss}***")
     return total_loss, diff_features
+
+def compute_masked_ncc(ref_image, template_image, ref_mask, template_mask):
+    """
+    Compute the Weighted Normalized Cross-Correlation (NCC) between two images.
+
+    Parameters:
+        ref_image (np.ndarray): Reference image array.
+        template_image (np.ndarray): Shifted template image array.
+        ref_mask (np.ndarray): Reference mask array with values between 0 and 1.
+        template_mask (np.ndarray): Template mask array with values between 0 and 1.
+
+    Returns:
+        float: Weighted NCC value.
+    """
+    # Compute combined weights
+    weights = ref_mask.astype(float) * template_mask.astype(float)
+
+    # Sum of weights
+    weight_sum = np.sum(weights)
+    if weight_sum == 0:
+        return np.nan  # or handle as appropriate
+
+    # Compute weighted means
+    mu_ref = np.sum(ref_image * weights) / weight_sum
+    mu_template = np.sum(template_image * weights) / weight_sum
+
+    # Compute weighted standard deviations
+    sigma_ref = np.sqrt(np.sum(weights * (ref_image - mu_ref) ** 2) / weight_sum)
+    sigma_template = np.sqrt(np.sum(weights * (template_image - mu_template) ** 2) / weight_sum)
+
+    # Avoid division by zero
+    if sigma_ref == 0 or sigma_template == 0:
+        return np.nan  # or handle as appropriate
+
+    # Compute weighted covariance
+    covariance = np.sum(weights * (ref_image - mu_ref) * (template_image - mu_template)) / weight_sum
+
+    # Compute weighted NCC
+    ncc = covariance / (sigma_ref * sigma_template)
+
+    return ncc
 
 def compute_sum_of_layers(diff_features, normalize=True):
     """
