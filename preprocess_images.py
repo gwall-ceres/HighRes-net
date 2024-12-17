@@ -57,11 +57,11 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
             raise ValueError("Input image must have shape (H, W), (H, W, 1), or (H, W, 3)")
     
     # Convert images to RGB if necessary
-    ref_image_rgb = ensure_rgb(ref_image * combined_mask)
-    mov_image_rgb = ensure_rgb(mov_image * combined_mask)
+    ref_image_rgb = ensure_rgb(ref_image)# * combined_mask)
+    mov_image_rgb = ensure_rgb(mov_image)# * combined_mask)
     
-    valid_pixels = np.sum(combined_mask)
-    perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
+    #valid_pixels = np.sum(combined_mask)
+    #perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
 
     #print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
 
@@ -77,13 +77,13 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
                              std=[0.229, 0.224, 0.225])   # ImageNet stds
     ])
     #torch.cuda.synchronize()
-    start = time.time()
+    #start = time.time()
     # Apply preprocessing to both images
     ref_tensor = preprocess(ref_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
     mov_tensor = preprocess(mov_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
     
     # Convert combined mask to a torch tensor
-    combined_mask_tensor = torch.from_numpy(combined_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)  # Shape: [1, 1, H, W]
+    #combined_mask_tensor = torch.from_numpy(combined_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)  # Shape: [1, 1, H, W]
     
     # Pass both images through the model to extract feature maps
     with torch.no_grad():
@@ -111,38 +111,22 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         # Get spatial dimensions of the feature map
         _, C, Hf, Wf = ref_feat.shape
         
-        # Resize the combined mask to match the feature map size using bicubic interpolation
-        # with a Gaussian pre-filter to smooth transitions
-        mask_resized = F.interpolate(
-            combined_mask_tensor, 
-            size=(Hf, Wf), 
-            mode='bicubic',  # Changed from bilinear to bicubic
-            antialias=True,
-            align_corners=True  # Helps maintain consistency at boundaries
-        )
         
-        # Optionally apply additional Gaussian smoothing to further reduce discontinuities
-        # This helps create smoother transitions in the mask
-        sigma = 0.5  # Adjust this value to control smoothing amount
-        kernel_size = max(3, int(2 * sigma + 1))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
+        # Resize the mask to match the feature map size using bicubic interpolation
+        mask_resized = transform.resize(
+                combined_mask,
+                (Hf, Wf),
+                order=3,  # bicubic interpolation
+                mode='constant',
+                cval=0,
+                anti_aliasing=True,
+                preserve_range=True
+            ).astype(np.float32)
         
-        gaussian_kernel = torch.tensor([
-            [np.exp(-(i**2 + j**2)/(2*sigma**2)) 
-             for i in range(-(kernel_size//2), kernel_size//2 + 1)]
-            for j in range(-(kernel_size//2), kernel_size//2 + 1)
-        ], device=device).float()
-        
-        gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
-        gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size, kernel_size)
-        gaussian_kernel = gaussian_kernel.repeat(1, 1, 1, 1)
-        
-        mask_resized = F.pad(mask_resized, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2), mode='reflect')
-        mask_resized = F.conv2d(mask_resized, gaussian_kernel, groups=1)
-        
-        # Ensure mask values stay in [0, 1] range after all operations
-        mask_resized = torch.clamp(mask_resized, 0, 1)
+        #mask_resized = np.ones((Hf, Wf), dtype=np.float32)
+
+        # Add batch and channel dims first, then move to GPU once
+        mask_resized = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(device)  # Shape: [1, 1, Hf, Wf]
         
         # Expand mask to match the number of channels in the feature map
         mask_expanded = mask_resized.expand_as(ref_feat)  # Shape: [1, C, Hf, Wf]
@@ -153,8 +137,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
 
         # Calculate total number of valid activations (channels * spatial dimensions * mask)
         num_valid_activations = torch.sum(mask_expanded)  # This gives us valid spatial positions * channels
-        #print(f"num_valid_activations = {num_valid_activations}")
-        
+             
         # Compute the Mean L1 Error between the masked feature maps
         l1_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid_activations
         l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)  # Element-wise differences
@@ -272,33 +255,34 @@ def compute_sum_of_layers(diff_features, normalize=True):
         
     return summed_activations
 
-def contrast_stretch_8bit(image):
+def contrast_stretch_8bit(image, mask=None):
     """
     Perform contrast stretching on a NumPy array to map its values to the 0-255 range.
+    
+    Parameters:
+        image (np.ndarray): Input image to be contrast stretched
+        mask (np.ndarray, optional): Mask where True/1 indicates valid pixels to include
+                                   in histogram calculation. If None, all pixels are used.
+    
+    Returns:
+        np.ndarray: Contrast-stretched image as uint8
     """
-    """
-    # Convert to float to prevent overflow/underflow
-    array = array.astype(float)
+    if mask is None:
+        # If no mask provided, use all pixels
+        p1 = np.percentile(image, 1)
+        p99 = np.percentile(image, 99)
+    else:
+        if mask.dtype != bool:
+            mask = (mask > 0.5).astype(bool)
+        # Calculate percentiles only for masked pixels
+        valid_pixels = image[mask]
+        if len(valid_pixels) == 0:
+            return np.zeros_like(image, dtype=np.uint8)
+            
+        p1 = np.percentile(valid_pixels, 1)
+        p99 = np.percentile(valid_pixels, 99)
 
-    # Compute minimum and maximum pixel values
-    min_val = np.min(array)
-    max_val = np.max(array)
-
-    print(f"contrast_stretch_8bit min = {min_val}, max = {max_val}")
-
-    # Avoid division by zero
-    if max_val - min_val == 0:
-        return np.zeros_like(array, dtype=np.uint8)
-
-    # Perform contrast stretching
-    stretched = (array - min_val) / (max_val - min_val) * 255.0
-
-    # Clip values to the 0-255 range and convert to uint8
-    stretched = np.clip(stretched, 0, 255).astype(np.uint8)
-    """
-    p1 = np.percentile(image, 1)  # 1st percentile (lower tail)
-    p99 = np.percentile(image, 99)  # 99th percentile (upper tail)
-
+    # Apply contrast stretching to the entire image using the computed intensity range
     stretched = exposure.rescale_intensity(
         image,
         in_range=(p1, p99),
@@ -677,10 +661,10 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
     - n_keypoints: Number of keypoints to detect.
     - match_threshold: Threshold for Lowe's ratio test (not directly used here).
     - ransac_threshold: RANSAC inlier threshold in pixels.
+    - scale: Scale factor for the images.
 
     Returns:
-    - aligned_image: Aligned version of image2.
-    - shift: Estimated (y, x) shift.
+    - shift_yx: Estimated (y, x) shift.
     """
     shape = ref_image.shape
     # Convert images to floating point
