@@ -788,10 +788,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_plots(self):
         """
-        Update the plots with new ml1e and perceptual loss values, and annotate the shifts.
+        Update the plots with new ml1e and perceptual loss values, and show shifts as x-axis labels.
         """
-        
-        shift_steps = range(len(self.ml1e_history))  # X-axis will represent shift steps
+        shift_steps = range(len(self.ml1e_history))  # X-axis positions
 
         # Clear the plots before updating
         self.ml1e_ax.clear()
@@ -799,33 +798,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Plot ml1e over shifts
         self.ml1e_ax.set_title("ml1e over Shifts")
-        self.ml1e_ax.set_xlabel("Shift Steps")
         self.ml1e_ax.set_ylabel("ml1e")
         self.ml1e_ax.plot(shift_steps, self.ml1e_history, 'r-')
 
-        # Annotate shifts on the ml1e plot
-        for i, ml1e in enumerate(self.ml1e_history):
-            shift_x = self.shift_x_history[i]
-            shift_y = self.shift_y_history[i]
-            self.ml1e_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], ml1e),
-                                textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='red')
-
         # Plot Perceptual Loss over shifts
         self.pl_ax.set_title("Perceptual Loss over Shifts")
-        self.pl_ax.set_xlabel("Shift Steps")
         self.pl_ax.set_ylabel("Perceptual Loss")
         self.pl_ax.plot(shift_steps, self.pl_history, 'b-')
 
-        # Annotate shifts on the Perceptual Loss plot
-        for i, pl in enumerate(self.pl_history):
-            shift_x = self.shift_x_history[i]
-            shift_y = self.shift_y_history[i]
-            self.pl_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], pl),
-                                textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='blue')
+        # Create x-axis labels showing the shifts
+        x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history, self.shift_y_history)]
+        
+        # Set x-axis labels and rotate them for better readability
+        self.ml1e_ax.set_xticks(shift_steps)
+        self.ml1e_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        
+        self.pl_ax.set_xticks(shift_steps)
+        self.pl_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+
+        # Add a label explaining the format
+        self.ml1e_ax.set_xlabel("Shifts (x, y)")
+        self.pl_ax.set_xlabel("Shifts (x, y)")
+
+        # Adjust layout to prevent label cutoff
+        self.ml1e_fig.tight_layout()
+        self.pl_fig.tight_layout()
 
         # Redraw the updated plots
         self.ml1e_canvas.draw()
         self.pl_canvas.draw()
+
 
     def compute_sum_of_layers(self):
         """
