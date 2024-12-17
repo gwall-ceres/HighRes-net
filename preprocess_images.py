@@ -276,6 +276,62 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     print(f"***perceptual loss = {total_loss}***")
     return total_loss, diff_features
 
+def compute_sum_of_layers(diff_features, normalize=True):
+    """
+    Compute the sum of all layers in diff_features dictionary.
+    This is used to visualize the sum of all layers in VGG feature space.
+    If normalize is True, normalize each layer to [0,1] range before summing.
+    """
+    
+    if diff_features is None:
+        return np.zeros((10,10), dtype=float)
+    
+    
+    # Find the largest dimensions among all layers
+    max_height = 0
+    max_width = 0
+    for layer in diff_features:
+        activations = diff_features[layer]
+        height, width = activations.shape
+        max_height = max(max_height, height)
+        max_width = max(max_width, width)
+    
+    # Create array to store the sum of all layers
+    summed_activations = np.zeros((max_height, max_width))
+    
+    # Add each normalized layer to the sum
+    for layer in diff_features:
+        activations = diff_features[layer]
+        
+        # Normalize the activations to [0,1] range
+        layer_max = np.max(np.abs(activations))
+        if layer_max > 0 and normalize:  # Avoid division by zero
+            normalized_activations = activations / layer_max
+        else:
+            normalized_activations = activations
+            
+        # Scale to largest dimensions if necessary
+        if normalized_activations.shape != (max_height, max_width):
+            scaled_activations = transform.resize(
+                normalized_activations,
+                (max_height, max_width),
+                order=3,  # Cubic interpolation
+                mode='reflect',
+                anti_aliasing=True,
+                preserve_range=True
+            )
+        else:
+            scaled_activations = normalized_activations
+            
+        # Add to sum
+        summed_activations += scaled_activations
+    
+    # Optionally normalize the final sum to [0,1] range
+    final_max = np.max(np.abs(summed_activations))
+    if final_max > 0:
+        summed_activations /= final_max
+        
+    return summed_activations
 
 def contrast_stretch_8bit(image):
     """

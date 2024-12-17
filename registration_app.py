@@ -1,8 +1,16 @@
 # registration_app.py
 '''
 Next steps
-implement more similarity metrics: mutual information, cross correlation
-then implement several more methods for estimating
+implement more similarity metrics: mutual information, cross correlation, L1 loss
+https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.normalized_mutual_information
+https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.normalized_cross_correlation
+https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics.structural_similarity
+https://scikit-image.org/docs/0.24.x/api/skimage.metrics.html#skimage.metrics    
+then implement several more methods for estimating the shift
+skimage.registration.optical_flow_tvl1
+skimage.registration.optical_flow_ilk
+
+we need to 
 
 '''
 import sys
@@ -434,11 +442,6 @@ class MainWindow(QtWidgets.QMainWindow):
         overlay_array[:, :, 1] = ref_enhanced           # Green channel (Reference Image)
         overlay_array[:, :, 2] = ref_enhanced           # Blue channel (Reference Image), creating cyan
 
-        # Debugging: Verify the range of overlay channels
-        # print(f"Overlay Array - R: {overlay_array[:, :, 0].min()} to {overlay_array[:, :, 0].max()}")
-        # print(f"Overlay Array - G: {overlay_array[:, :, 1].min()} to {overlay_array[:, :, 1].max()}")
-        # print(f"Overlay Array - B: {overlay_array[:, :, 2].min()} to {overlay_array[:, :, 2].max()}")
-
         # Convert the overlay array to QImage
         bytes_per_line = 3 * overlay_array.shape[1]
         overlay_qimage = QtGui.QImage(overlay_array.tobytes(), overlay_array.shape[1], overlay_array.shape[0],
@@ -774,53 +777,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_canvas.draw()
 
     def compute_sum_of_layers(self):
-        if self.diff_features is None:
-            return np.zeros((10,10), dtype=float)
-        
-        # Find the largest dimensions among all layers
-        max_height = 0
-        max_width = 0
-        for layer in self.diff_features:
-            activations = self.diff_features[layer]
-            height, width = activations.shape
-            max_height = max(max_height, height)
-            max_width = max(max_width, width)
-        
-        # Create array to store the sum of all layers
-        summed_activations = np.zeros((max_height, max_width))
-        
-        # Add each normalized layer to the sum
-        for layer in self.diff_features:
-            activations = self.diff_features[layer]
-            
-            # Normalize the activations to [0,1] range
-            layer_max = np.max(np.abs(activations))
-            if layer_max > 0:  # Avoid division by zero
-                normalized_activations = activations / layer_max
-            else:
-                normalized_activations = activations
-                
-            # Scale to largest dimensions if necessary
-            if normalized_activations.shape != (max_height, max_width):
-                scaled_activations = transform.resize(
-                    normalized_activations,
-                    (max_height, max_width),
-                    order=3,  # Cubic interpolation
-                    mode='reflect',
-                    anti_aliasing=True,
-                    preserve_range=True
-                )
-            else:
-                scaled_activations = normalized_activations
-                
-            # Add to sum
-            summed_activations += scaled_activations
-        
-        # Optionally normalize the final sum to [0,1] range
-        final_max = np.max(np.abs(summed_activations))
-        if final_max > 0:
-            summed_activations /= final_max
-            
+        """
+        Compute the sum of all layers in diff_features dictionary.
+        This is used to visualize the sum of all layers in VGG feature space.
+        """
+        summed_activations = ppi.compute_sum_of_layers(self.diff_features, normalize=True)
+
         return summed_activations
 
     def compute_and_display_heatmap(self, shifted_template_image, shifted_template_mask):
