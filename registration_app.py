@@ -95,6 +95,12 @@ class MainWindow(QtWidgets.QMainWindow):
         apply_best_shift_action.triggered.connect(self.apply_best_shift)
         toolbar.addAction(apply_best_shift_action)
 
+        # Add after other toolbar items
+        clear_history_action = QtWidgets.QAction("Clear History", self)
+        clear_history_action.triggered.connect(self.reset_history)
+        toolbar.addAction(clear_history_action)
+
+
         # ----- Central Widget and Grid Layout -----
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -165,14 +171,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Graphs Layout -----
         graphs_layout = QtWidgets.QHBoxLayout()
 
-        # Initialize MSE Plot
-        self.mse_fig = Figure(figsize=(4, 3))
-        self.mse_canvas = FigureCanvas(self.mse_fig)
-        self.mse_ax = self.mse_fig.add_subplot(111)
-        self.mse_ax.set_title("MSE over Shifts")
-        self.mse_ax.set_xlabel("Shift Steps")
-        self.mse_ax.set_ylabel("MSE")
-        graphs_layout.addWidget(self.mse_canvas)
+        # Initialize ml1e Plot
+        self.ml1e_fig = Figure(figsize=(4, 3))
+        self.ml1e_canvas = FigureCanvas(self.ml1e_fig)
+        self.ml1e_ax = self.ml1e_fig.add_subplot(111)
+        self.ml1e_ax.set_title("ml1e over Shifts")
+        self.ml1e_ax.set_xlabel("Shift Steps")
+        self.ml1e_ax.set_ylabel("ml1e")
+        graphs_layout.addWidget(self.ml1e_canvas)
 
         # Initialize Perceptual Loss Plot
         self.pl_fig = Figure(figsize=(4, 3))
@@ -218,7 +224,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diff_features = None
 
         # ----- Initialize Loss Histories -----
-        self.mse_history = []
+        self.ml1e_history = []
         self.pl_history = []
         self.shift_x_history = []
         self.shift_y_history = []
@@ -242,7 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_image_from_path("template_mask", self.config["template_mask"])
 
     def reset_history(self):
-        self.mse_history = []
+        self.ml1e_history = []
         self.pl_history = []
         self.shift_x_history = []
         self.shift_y_history = []
@@ -251,12 +257,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Initialize the plots with empty data.
         """
-        self.mse_ax.clear()
-        self.mse_ax.set_title("MSE over Shifts")
-        self.mse_ax.set_xlabel("Shift Steps")
-        self.mse_ax.set_ylabel("MSE")
-        self.mse_ax.plot([], [], 'r-')
-        self.mse_canvas.draw()
+        self.ml1e_ax.clear()
+        self.ml1e_ax.set_title("ml1e over Shifts")
+        self.ml1e_ax.set_xlabel("Shift Steps")
+        self.ml1e_ax.set_ylabel("ml1e")
+        self.ml1e_ax.plot([], [], 'r-')
+        self.ml1e_canvas.draw()
 
         self.pl_ax.clear()
         self.pl_ax.set_title("Perceptual Loss over Shifts")
@@ -264,7 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pl_ax.set_ylabel("Perceptual Loss")
         self.pl_ax.plot([], [], 'b-')
         self.pl_canvas.draw()
-        # logging.debug("Initialized MSE and Perceptual Loss plots.")
+        # logging.debug("Initialized ml1e and Perceptual Loss plots.")
 
     def load_image(self, image_type):
         """
@@ -579,7 +585,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def apply_shift_and_update_overlay(self):
         """
         Shift the template image and its mask based on current_deltax and current_deltay,
-        update the overlay image, and recompute MSE and perceptual loss.
+        update the overlay image, and recompute ml1e and perceptual loss.
         """
         if self.template_image_array is None or self.ref_image_array is None:
             logging.warning("Cannot apply shift: Original Template or Reference image is None.")
@@ -624,18 +630,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # logging.debug("Updated overlay after shifting.")
 
         # Compute Losses
-        mse = self.compute_mse(shifted_image, shifted_mask)
+        ml1e = self.compute_ml1e(shifted_image, shifted_mask)
+         # Append to loss history
+        self.ml1e_history.append(ml1e)
         pl, self.diff_features = self.compute_perceptual_loss(shifted_image, shifted_mask)
-        # logging.debug(f"Computed MSE: {mse}, Perceptual Loss: {pl}")
+        # logging.debug(f"Computed ml1e: {ml1e}, Perceptual Loss: {pl}")
 
-        # Append to loss history
-        self.mse_history.append(mse)
+       
+        selected_choice = self.layer_dropdown.currentText()
+        
+        if selected_choice == "Heatmap" or selected_choice == "Sum of Layers":
+            pass
+        else:
+            selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
+            #print(f"selected_layer = {selected_layer}")
+            if self.diff_features is not None:
+                activations = self.diff_features[selected_layer]
+                pl = np.sum(activations)
+                
+
         self.pl_history.append(pl)
-        # logging.debug("Appended MSE and Perceptual Loss to histories.")
+
+        # logging.debug("Appended ml1e and Perceptual Loss to histories.")
 
         # Update plots
         self.update_plots()
-        # logging.debug("Updated MSE and Perceptual Loss plots.")
+        # logging.debug("Updated ml1e and Perceptual Loss plots.")
 
         # Update difference heatmap
         self.compute_and_display_heatmap(shifted_image, shifted_mask)
@@ -670,20 +690,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_shift_and_update_overlay()
 
 
-    def compute_mse(self, shifted_template, shifted_template_mask):
+    def compute_ml1e(self, shifted_template, shifted_template_mask):
         """
         Compute Mean Squared Error between reference and shifted template images.
         """
-        mse = ppi.compute_mse(self.ref_image_array, self.ref_mask_array, shifted_template, shifted_template_mask)
-        return mse
+        ml1e = ppi.compute_ml1e(self.ref_image_array, self.ref_mask_array, shifted_template, shifted_template_mask)
+        return ml1e
 
     def compute_perceptual_loss(self, shifted_template, shifted_template_mask):
         """
         Compute Perceptual Loss between reference and shifted template images.
         Placeholder function. Replace with actual implementation.
         """
-        # Placeholder: using MSE as a stand-in
-        #pl = self.compute_mse(shifted_template, shifted_template_mask)
+        # Placeholder: using ml1e as a stand-in
+        #pl = self.compute_ml1e(shifted_template, shifted_template_mask)
         pl, diff_features = ppi.compute_perceptual_loss(self.perceptual_loss_model,
                                          self.ref_image_array,
                                          shifted_template,
@@ -731,32 +751,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # Step 4: Apply the new shift and update all displays
         self.apply_shift_and_update_overlay()
 
-        # Step 5: Recompute MSE, Perceptual Loss, Heatmap, and Graphs
+        # Step 5: Recompute ml1e, Perceptual Loss, Heatmap, and Graphs
         #self.compute_and_display_heatmap(shifted_image, shifted_mask)
         self.update_plots()
 
     def update_plots(self):
         """
-        Update the plots with new MSE and perceptual loss values, and annotate the shifts.
+        Update the plots with new ml1e and perceptual loss values, and annotate the shifts.
         """
         
-        shift_steps = range(len(self.mse_history))  # X-axis will represent shift steps
+        shift_steps = range(len(self.ml1e_history))  # X-axis will represent shift steps
 
         # Clear the plots before updating
-        self.mse_ax.clear()
+        self.ml1e_ax.clear()
         self.pl_ax.clear()
 
-        # Plot MSE over shifts
-        self.mse_ax.set_title("MSE over Shifts")
-        self.mse_ax.set_xlabel("Shift Steps")
-        self.mse_ax.set_ylabel("MSE")
-        self.mse_ax.plot(shift_steps, self.mse_history, 'r-')
+        # Plot ml1e over shifts
+        self.ml1e_ax.set_title("ml1e over Shifts")
+        self.ml1e_ax.set_xlabel("Shift Steps")
+        self.ml1e_ax.set_ylabel("ml1e")
+        self.ml1e_ax.plot(shift_steps, self.ml1e_history, 'r-')
 
-        # Annotate shifts on the MSE plot
-        for i, mse in enumerate(self.mse_history):
+        # Annotate shifts on the ml1e plot
+        for i, ml1e in enumerate(self.ml1e_history):
             shift_x = self.shift_x_history[i]
             shift_y = self.shift_y_history[i]
-            self.mse_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], mse),
+            self.ml1e_ax.annotate(f"({shift_x:.2f}, {shift_y:.2f})", (shift_steps[i], ml1e),
                                 textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='red')
 
         # Plot Perceptual Loss over shifts
@@ -773,7 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='blue')
 
         # Redraw the updated plots
-        self.mse_canvas.draw()
+        self.ml1e_canvas.draw()
         self.pl_canvas.draw()
 
     def compute_sum_of_layers(self):

@@ -189,6 +189,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         axes = None
     
     diff_features = {}
+    #loss_per_layer = []
     # Iterate over each pair of feature maps
     for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
         layer_name = f"Layer_{idx+1}"
@@ -220,7 +221,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
     
         # Accumulate the loss
         total_loss += l1_loss.item()
-        
+        #loss_per_layer.append(l1_loss.item())
         if debug:
             # Select 2 random channels
             selected_channels = random.sample(range(C), 2) if C >=2 else [0]
@@ -271,6 +272,7 @@ def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, dev
         plt.show()
     #torch.cuda.synchronize()
     end = time.time()
+
     #print(f"***total time to compute the perceptual loss = {end - start}***")
     #total_loss = total_loss / len(ref_features) #average over the layers
     print(f"***perceptual loss = {total_loss}***")
@@ -406,7 +408,26 @@ def compute_mse(image1, mask1, image2, mask2, use_masks=True, normalize=True):
     else:
         return np.mean((masked_image1 - masked_image2) ** 2)
 
+def compute_ml1e(image1, mask1, image2, mask2, use_masks=True, normalize=True):
+    #only consider pixels that are valid in both images, so we "and" the masks
 
+    if use_masks:
+        combined_mask = np.logical_and(mask1, mask2)
+        # Apply the combined mask to both images
+        masked_image1 = image1[combined_mask]
+        masked_image2 = image2[combined_mask]
+    else:
+        masked_image1 = image1
+        masked_image2 = image2
+
+    # Normalize both masked images
+    if normalize:
+        normalized_image1 = normalize_masked_array(masked_image1)
+        normalized_image2 = normalize_masked_array(masked_image2)
+        return np.mean((normalized_image1 - normalized_image2) ** 2)
+    else:
+        return np.mean(np.abs(masked_image1 - masked_image2))
+    
 def compute_ssim(image1, mask1, image2, mask2, use_masks=True, normalize=True):
     """
     Compute the Structural Similarity Index Measure (SSIM) between two images,
