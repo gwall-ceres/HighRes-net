@@ -84,6 +84,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.coreg_dropdown.addItem("Fourier")
         self.coreg_dropdown.addItem("Point Matching")
         self.coreg_dropdown.addItem("NCC")
+        self.coreg_dropdown.addItem("Perceptual Loss")
         self.coreg_dropdown.addItem("ILK Optical Flow")
         self.coreg_dropdown.addItem("TVL1 Optical Flow")
         #self.coreg_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
@@ -970,6 +971,8 @@ class MainWindow(QtWidgets.QMainWindow):
             shift_yx = ppi.compute_shift_point_matching(self.ref_image_array, shifted_image)
         elif selected_choice == "NCC":
             shift_yx = ppi.compute_shift_ncc(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+        elif selected_choice == "Perceptual Loss":
+            shift_yx = ppi.compute_shift_pl(self.perceptual_loss_model, self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
         elif selected_choice == "ILK Optical Flow":
             shift_yx = ppi.compute_shift_ilk_optical_flow(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
         elif selected_choice == "TVL1 Optical Flow":

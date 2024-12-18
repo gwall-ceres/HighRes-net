@@ -7,7 +7,7 @@ from skimage.transform import SimilarityTransform
 from skimage.feature import ORB, match_descriptors
 from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift as ndi_shift
-from torchvision import transforms
+
 import torch
 import torch.nn.functional as F
 import os
@@ -17,143 +17,79 @@ import time
 
 
 def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu'):
-    """
-    Compute the perceptual loss between two images given their masks.
-    Optionally visualize selected activations and masks for debugging.
+    # Input validation
+    assert ref_image.shape[:2] == mov_image.shape[:2], "Images must have same dimensions"
+    assert ref_mask.shape == mov_mask.shape, "Masks must have same dimensions"
     
-    Parameters:
-    - model: A PyTorch model (e.g., VGGFeatureExtractor) returning feature maps from multiple layers.
-             The model should return a list or dictionary of feature maps when called.
-    - ref_image: NumPy array, shape (H, W) or (H, W, C), reference image.
-    - mov_image: NumPy array, shape (H, W) or (H, W, C), moving image to align.
-    - ref_mask: NumPy boolean array, shape (H, W), valid pixels for ref_image.
-    - mov_mask: NumPy boolean array, shape (H, W), valid pixels for mov_image.
-    - device: 'cpu' or 'cuda', the device to run computations on.
-    - debug: Boolean, if True, visualize activations and masks.
+    # combine the two masks in order to only consider valid pixels
+    combined_mask = ref_mask.astype(float) * mov_mask.astype(float)
+    # Apply masks to input images
+    ref_masked = ref_image * combined_mask
+    mov_masked = mov_image * combined_mask
     
-    Returns:
-    - loss_value: float, the perceptual loss computed only over valid overlapping pixels.
-    """
-    
-    # Ensure both images have the same spatial dimensions
-    assert ref_image.shape[:2] == mov_image.shape[:2], "Reference and moving images must have the same height and width."
-    assert ref_mask.shape == mov_mask.shape, "Reference and moving masks must have the same height and width."
-    
-    # Combine masks to focus on overlapping valid regions
-    #combined_mask = ref_mask & mov_mask  # Shape: (H, W)
-    combined_mask = ref_mask.astype(float) * mov_mask.astype(float)  # Shape: (H, W)
-    # Function to convert grayscale to RGB by replicating channels
-    def ensure_rgb(img):
-        if img.ndim == 2:
-            # Grayscale image, replicate channels to make (H, W, 3)
-            return np.stack([img, img, img], axis=-1)
-        elif img.ndim == 3 and img.shape[2] == 1:
-            # Single-channel image with shape (H, W, 1), replicate to (H, W, 3)
-            return np.concatenate([img, img, img], axis=2)
-        elif img.ndim == 3 and img.shape[2] == 3:
-            # Already RGB
-            return img
-        else:
-            raise ValueError("Input image must have shape (H, W), (H, W, 1), or (H, W, 3)")
-    
-    # Convert images to RGB if necessary
-    ref_image_rgb = ensure_rgb(ref_image)# * combined_mask)
-    mov_image_rgb = ensure_rgb(mov_image)# * combined_mask)
-    
-    #valid_pixels = np.sum(combined_mask)
-    #perc = 100.0 * float(valid_pixels) / (ref_image.shape[0] * ref_image.shape[1])
-
-    #print(f"Number of valid pixels: {valid_pixels}, {perc:.2f}%")
-
-    # Zero out invalid pixels according to the combined mask
-    #ref_image_rgb[~combined_mask] = 0
-    #mov_image_rgb[~combined_mask] = 0
-    
-    # Define the preprocessing pipeline: PIL conversion, tensor conversion, normalization
-    preprocess = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet means
-                             std=[0.229, 0.224, 0.225])   # ImageNet stds
-    ])
-    #torch.cuda.synchronize()
-    #start = time.time()
-    # Apply preprocessing to both images
-    ref_tensor = preprocess(ref_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
-    mov_tensor = preprocess(mov_image_rgb).unsqueeze(0).to(device)  # Shape: [1, 3, H, W]
-    
-    # Convert combined mask to a torch tensor
-    #combined_mask_tensor = torch.from_numpy(combined_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)  # Shape: [1, 1, H, W]
-    
-    # Pass both images through the model to extract feature maps
+    # Extract features using the model (which handles grayscale conversion)
     with torch.no_grad():
-        ref_features = model(ref_tensor)  # Assume this returns a list or dict of feature maps
-        mov_features = model(mov_tensor)  # Same structure as ref_features
+        ref_features = model(ref_masked)
+        mov_features = model(mov_masked)
     
-    # If the model returns a dictionary, ensure consistent ordering
+    # Ensure consistent feature ordering
     if isinstance(ref_features, dict):
         feature_names = sorted(ref_features.keys())
-        #print(f"feature_names = {feature_names}")
         ref_features = [ref_features[name] for name in feature_names]
         mov_features = [mov_features[name] for name in feature_names]
-    elif isinstance(ref_features, list) or isinstance(ref_features, tuple):
-        pass  # Already a list or tuple
-    else:
-        raise TypeError("Model output must be a list, tuple, or dictionary of feature maps.")
     
-    # Initialize total loss
+    # Initialize loss tracking
     total_loss = 0.0
     diff_features = {}
-    #loss_per_layer = []
-    # Iterate over each pair of feature maps
+    # Weights for VGG19 layers ['0', '5', '10', '19', '28']
+    # Layer 0: First conv layer - highest detail
+    # Layer 5: End of first conv block
+    # Layer 10: End of second conv block
+    # Layer 19: Deep in third conv block
+    # Layer 28: Deep features
+    layer_weights = [1.0, 0.8, 0.6, 0.4, 0.2]  # Decreasing weights for deeper layers
+    
+    # Process each layer with proper mask handling
     for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
-        layer_name = f"Layer_{idx+1}"
-        # Get spatial dimensions of the feature map
         _, C, Hf, Wf = ref_feat.shape
         
-        
-        # Resize the mask to match the feature map size using bicubic interpolation
+        # Resize mask to match feature map size
         mask_resized = transform.resize(
-                combined_mask,
-                (Hf, Wf),
-                order=3,  # bicubic interpolation
-                mode='constant',
-                cval=0,
-                anti_aliasing=True,
-                preserve_range=True
-            ).astype(np.float32)
+            combined_mask,
+            (Hf, Wf),
+            order=1,  # Use bilinear interpolation for mask
+            mode='constant',
+            cval=0,
+            anti_aliasing=True,
+            preserve_range=True
+        ).astype(np.float32)
         
-        #mask_resized = np.ones((Hf, Wf), dtype=np.float32)
-
-        # Add batch and channel dims first, then move to GPU once
-        mask_resized = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(device)  # Shape: [1, 1, Hf, Wf]
+        # Convert mask to tensor and expand to match feature dimensions
+        mask_tensor = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(device)
+        mask_expanded = mask_tensor.expand_as(ref_feat)
         
-        # Expand mask to match the number of channels in the feature map
-        mask_expanded = mask_resized.expand_as(ref_feat)  # Shape: [1, C, Hf, Wf]
-        
-        # Apply the mask to both feature maps
+        # Apply mask to features
         ref_feat_masked = ref_feat * mask_expanded
         mov_feat_masked = mov_feat * mask_expanded
-
-        # Calculate total number of valid activations (channels * spatial dimensions * mask)
-        num_valid_activations = torch.sum(mask_expanded)  # This gives us valid spatial positions * channels
-             
-        # Compute the Mean L1 Error between the masked feature maps
-        l1_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid_activations
-        l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)  # Element-wise differences
-        #sum over the channels
-        l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid_activations  # sum over the channels, then squeeze to remove the extra dimension
-        l1_loss2 = l1_diff_summed.sum() 
-        #print(f"perc loss -> l1_loss = {l1_loss}, l1_loss2 = {l1_loss2}")
-        diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()  # Save the l1 differences
+        
+        # Calculate valid pixels for this layer
+        num_valid = torch.sum(mask_expanded)
+        if num_valid > 0:
+            # Compute masked L1 loss directly on feature values
+            layer_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid
+            
+            # Store feature differences for visualization
+            l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)
+            l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid
+            diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()
+            
+            # Apply layer weight
+            weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
+            total_loss += weight * layer_loss.item()
     
-        # Accumulate the loss
-        total_loss += l1_loss.item()
-        #loss_per_layer.append(l1_loss.item())
-
-    #print(f"***total time to compute the perceptual loss = {end - start}***")
-    total_loss = total_loss / len(ref_features) #average over the layers
-    print(f"***perceptual loss = {total_loss}***")
+    # Normalize by sum of weights
+    total_loss /= sum(layer_weights[:len(ref_features)])
+    
     return total_loss, diff_features
 
 def compute_masked_ncc(ref_image, template_image, ref_mask, template_mask):
@@ -619,7 +555,137 @@ def compute_shift_ncc(ref_image, template_image, ref_mask, template_mask,
         points_per_dim, scale_factor, max_recursions
     )
 
+def compute_shift_pl(model, ref_image, template_image, ref_mask, template_mask, 
+                    points_per_dim=3, max_recursions=3):
+    """
+    Main function to compute the best shift between reference and template images using
+    perceptual loss with VGG features.
+    
+    Parameters:
+        model: VGG-based perceptual loss network
+        ref_image (np.ndarray): Reference image
+        template_image (np.ndarray): Template image to be aligned
+        ref_mask (np.ndarray): Reference mask (binary)
+        template_mask (np.ndarray): Template mask (binary)
+        points_per_dim (int): Number of points to evaluate per dimension
+        max_recursions (int): Maximum number of recursive calls
+    
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
+    """
+    # Calculate scale factor based on points_per_dim
+    scale_factor = 1.0 / (points_per_dim - 1)
+    if scale_factor < 0.25:
+        scale_factor = 0.25
+    if scale_factor >= 1.0:
+        scale_factor = 0.9
+    
+    # Start recursive search
+    return recursive_pl_search(
+        model, ref_image, ref_mask, template_image, template_mask,
+        points_per_dim, scale_factor, max_recursions
+    )
 
+def recursive_pl_search(model, ref_image, ref_mask, template_image, template_mask, 
+                       points_per_dim, scale_factor, max_recursions, current_recursion=0,
+                       prev_best_dy=0.0, prev_best_dx=0.0):
+    """
+    Recursive function to search for the best alignment using perceptual loss.
+    
+    Parameters:
+        model: VGG-based perceptual loss network
+        ref_image (np.ndarray): Reference image
+        ref_mask (np.ndarray): Reference mask
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask
+        points_per_dim (int): Number of points to evaluate per dimension
+        scale_factor (float): Factor to scale bounds by for next recursion
+        max_recursions (int): Maximum recursion depth
+        current_recursion (int): Current recursion depth
+        prev_best_dy (float): Best dy from previous recursion
+        prev_best_dx (float): Best dx from previous recursion
+        
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
+    """
+    # Compute current bounds based on recursion level
+    bound_width = 2.0 * (scale_factor ** current_recursion)
+    bounds_y = (prev_best_dy - bound_width/2, prev_best_dy + bound_width/2)
+    bounds_x = (prev_best_dx - bound_width/2, prev_best_dx + bound_width/2)
+
+    print(f"recursive_pl_search::bound_width {bound_width}, current_recursion {current_recursion}")
+    print(f"recursive_pl_search::prev_best_dy {prev_best_dy} prev_best_dx {prev_best_dx}")
+    print(f"recursive_pl_search::bounds_y {bounds_y} bounds_x {bounds_x}")
+    
+    # Compute best shift for current grid
+    best_dy, best_dx, best_score = compute_grid_pl(
+        model, ref_image, ref_mask, template_image, template_mask,
+        bounds_y, bounds_x, points_per_dim
+    )
+    print(f"recursive_pl_search::best_score {best_score}, best_dy {best_dy}, best_dx {best_dx}")
+    # Base case: reached maximum recursions
+    if current_recursion >= max_recursions - 1:
+        return best_dy, best_dx
+    
+    # Recursive case: continue search with refined bounds
+    return recursive_pl_search(
+        model, ref_image, ref_mask, template_image, template_mask,
+        points_per_dim, scale_factor, max_recursions,
+        current_recursion + 1, best_dy, best_dx
+    )
+
+def compute_grid_pl(model, ref_image, ref_mask, template_image, template_mask, 
+                   bounds_y, bounds_x, points_per_dim):
+    """
+    Compute perceptual loss scores for a grid of points within given bounds.
+    
+    Parameters:
+        model: VGG-based perceptual loss network
+        ref_image (np.ndarray): Reference image
+        ref_mask (np.ndarray): Reference mask
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask
+        bounds_y (tuple): (min_y, max_y) bounds for vertical shifts
+        bounds_x (tuple): (min_x, max_x) bounds for horizontal shifts
+        points_per_dim (int): Number of points to evaluate per dimension
+        
+    Returns:
+        tuple: (best_shift_y, best_shift_x, best_score)
+    """
+    min_y, max_y = bounds_y
+    min_x, max_x = bounds_x
+    
+    # Generate grid points
+    y_points = np.linspace(min_y, max_y, points_per_dim)
+    x_points = np.linspace(min_x, max_x, points_per_dim)
+    
+    best_score = float('inf')  # We want to minimize perceptual loss
+    best_shift = (0.0, 0.0)
+    
+    # Evaluate perceptual loss at each grid point
+    for dy in y_points:
+        for dx in x_points:
+            # Shift template image and mask
+            shifted_template = ndi_shift(template_image, (dy, dx), mode='constant', order=3)
+            shifted_mask = ndi_shift(template_mask.astype(float), (dy, dx), 
+                                   mode='constant', order=1)
+            shifted_mask = (shifted_mask > 0.5).astype(float)
+            
+            # Compute perceptual loss between reference and shifted template
+            pl_score, _ = compute_perceptual_loss(
+                model=model,
+                ref_image=ref_image,
+                mov_image=shifted_template,
+                ref_mask=ref_mask,
+                mov_mask=shifted_mask,
+                device=model.hardware
+            )
+            
+            if pl_score < best_score:
+                best_score = pl_score
+                best_shift = (dy, dx)
+    
+    return best_shift[0], best_shift[1], best_score
 
 def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     #i have different way of applying the mask to the image before computing the phase cross correlation
