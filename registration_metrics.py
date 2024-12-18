@@ -66,12 +66,13 @@ def compute_perceptual_loss(ref_image, mov_image,
         mask_resized = transform.resize(
             combined_mask,
             (Hf, Wf),
-            order=1,  # Use bilinear interpolation for mask
+            order=0,  # Use nearest neighbor interpolation for mask
             mode='constant',
             cval=0,
-            anti_aliasing=True,
+            anti_aliasing=False,
             preserve_range=True
         ).astype(np.float32)
+
         
         # Convert mask to tensor and expand to match feature dimensions
         mask_tensor = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(model.hardware)
@@ -90,7 +91,10 @@ def compute_perceptual_loss(ref_image, mov_image,
             # Store feature differences for visualization
             l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)
             l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid
+            #store the feature differences so we can plot them later
             diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()
+            #store the mask so we can plot it later
+            diff_features[f"{feature_names[idx]}_mask"] = mask_resized
             
             # Apply layer weight
             weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
@@ -101,15 +105,6 @@ def compute_perceptual_loss(ref_image, mov_image,
     
     return total_loss, diff_features
 
-    '''
-   score = metric_fn(
-                ref_image=ref_image,
-                mov_image=shifted_template,
-                ref_mask=ref_mask,
-                mov_mask=shifted_mask,
-                **metric_kwargs
-            )
-            '''
 #need to change these names
 def compute_masked_ncc(ref_image, mov_image, ref_mask, mov_mask, **metric_kwargs):
     """
@@ -218,7 +213,7 @@ def compute_ml1e(ref_image, mov_image, ref_mask, mov_mask, use_masks=True, norma
     if normalize:
         normalized_ref = normalize_masked_array(masked_ref)
         normalized_mov = normalize_masked_array(masked_mov)
-        return np.mean(np.abs(masked_ref - masked_mov))
+        return np.mean(np.abs(normalized_ref - normalized_mov))
     else:
         return np.mean(np.abs(masked_ref - masked_mov))
 
@@ -278,7 +273,7 @@ def compute_ssim(ref_image, mov_image, ref_mask, mov_mask, use_masks=True, **met
 
     return ssim_value
 
-def compute_mutual_information(ref_image, mov_image, ref_mask, mov_mask, use_masks=True, 
+def compute_mi(ref_image, mov_image, ref_mask, mov_mask, use_masks=True, 
                              bins=100, **metric_kwargs):
     """
     Compute Mutual Information between two images using scikit-image.
