@@ -462,170 +462,162 @@ def process_image_for_display(image, p2=1, p98=99):
 
 
 
-
-def visualize_alignment2(ref_image, aligned_image, ref_mask, aligned_mask, shift_vector, suffix=''):
+def compute_grid_mncc(norm_ref, ref_mask, template_image, template_mask, bounds_y, bounds_x, points_per_dim):
     """
-    Visualize the alignment between the reference and aligned images along with their masks.
+    Compute MNCC scores for a grid of points within given bounds.
     
     Parameters:
-        ref_image (np.ndarray): Reference image array (grayscale or RGB), already processed for display.
-        aligned_image (np.ndarray): Aligned image array (grayscale or RGB), already processed for display.
-        ref_mask (np.ndarray): Binary mask for the reference image.
-        aligned_mask (np.ndarray): Binary mask for the aligned image.
-        shift_vector (tuple or list): Total shift applied (delta_y, delta_x).
-        suffix (str): Optional identifier for labeling.
+        norm_ref (np.ndarray): Normalized reference image
+        ref_mask (np.ndarray): Reference mask as float [0,1]
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask as bool
+        bounds_y (tuple): (min_y, max_y) bounds for vertical shifts
+        bounds_x (tuple): (min_x, max_x) bounds for horizontal shifts
+        points_per_dim (int): Number of points to evaluate per dimension
+        
+    Returns:
+        tuple: (best_shift_y, best_shift_x, best_score)
     """
-    # Ensure masks are binary and have the same shape as images
-    if ref_mask.ndim == 2:
-        ref_mask_display = ref_mask
-    else:
-        ref_mask_display = ref_mask[:, :, 0]  # Assuming single-channel masks
+    min_y, max_y = bounds_y
+    min_x, max_x = bounds_x
     
-    if aligned_mask.ndim == 2:
-        aligned_mask_display = aligned_mask
-    else:
-        aligned_mask_display = aligned_mask[:, :, 0]
+    # Generate grid points
+    y_points = np.linspace(min_y, max_y, points_per_dim)
+    x_points = np.linspace(min_x, max_x, points_per_dim)
     
-    # Create a figure with multiple subplots
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    best_score = float('-inf')
+    best_shift = (0.0, 0.0)
     
-    # Display Reference Image
-    axes[0, 0].imshow(ref_image, cmap='gray' if ref_image.ndim == 2 else None)
-    axes[0, 0].set_title('Reference Image')
-    axes[0, 0].axis('off')
+    # Evaluate MNCC at each grid point
+    for dy in y_points:
+        for dx in x_points:
+            # Shift template image and mask
+            shifted_template = ndi_shift(template_image, (dy, dx), mode='constant', order=3)
+            shifted_mask = ndi_shift(template_mask.astype(float), (dy, dx), 
+                                  mode='constant', order=1)
+            shifted_mask = (shifted_mask > 0.5).astype(float)
+            
+            # Compute combined mask
+            combined_mask = ref_mask * shifted_mask
+            weight_sum = np.sum(combined_mask)
+            
+            if weight_sum > 0:
+                # Compute normalized template statistics
+                mu_template = np.sum(shifted_template * combined_mask) / weight_sum
+                sigma_template = np.sqrt(np.sum(combined_mask * 
+                                              (shifted_template - mu_template) ** 2) / 
+                                      weight_sum)
+                
+                if sigma_template > 0:
+                    # Compute correlation using pre-computed normalized reference
+                    norm_template = (shifted_template - mu_template) / sigma_template
+                    mncc = np.sum(combined_mask * norm_ref * norm_template) / weight_sum
+                    
+                    if mncc > best_score:
+                        best_score = mncc
+                        best_shift = (dy, dx)
     
-    # Display Aligned Image
-    axes[0, 1].imshow(aligned_image, cmap='gray' if aligned_image.ndim == 2 else None)
-    axes[0, 1].set_title('Aligned Image')
-    axes[0, 1].axis('off')
-    
-    # Display Difference Image
-    if ref_image.ndim == 3:
-        # For RGB images, compute the mean difference across channels
-        difference = np.mean(np.abs(ref_image - aligned_image), axis=2)
-    else:
-        difference = np.abs(ref_image - aligned_image)
-    difference = process_image_for_display(difference)
-    axes[0, 2].imshow(difference, cmap='gray')
-    axes[0, 2].set_title('Difference Image')
-    axes[0, 2].axis('off')
-    
-    # Overlay Reference Mask on Reference Image
-    axes[1, 0].imshow(ref_image, cmap='gray' if ref_image.ndim == 2 else None)
-    axes[1, 0].imshow(ref_mask_display, cmap='jet', alpha=0.3)
-    axes[1, 0].set_title('Reference Image with Mask')
-    axes[1, 0].axis('off')
-    
-    # Overlay Aligned Mask on Aligned Image
-    axes[1, 1].imshow(aligned_image, cmap='gray' if aligned_image.ndim == 2 else None)
-    axes[1, 1].imshow(aligned_mask_display, cmap='jet', alpha=0.3)
-    axes[1, 1].set_title('Aligned Image with Mask')
-    axes[1, 1].axis('off')
-    
-    # Display Shift Information
-    axes[1, 2].axis('off')  # No image, just text
-    text = f"""
-    Alignment Summary
-    -----------------
-    Shift Applied:
-      Δy: {shift_vector[0]:.4f}
-      Δx: {shift_vector[1]:.4f}
-    Image Set: {suffix}
+    return best_shift[0], best_shift[1], best_score
+
+
+def recursive_mncc_search(norm_ref, ref_mask, template_image, template_mask, 
+                         points_per_dim, scale_factor, max_recursions, current_recursion=0,
+                         prev_best_dy=0.0, prev_best_dx=0.0):
     """
-    axes[1, 2].text(0.5, 0.5, text, fontsize=14, ha='center', va='center', wrap=True)
-    axes[1, 2].set_title('Shift Information')
-    
-    plt.tight_layout()
-    plt.show()
-
-
-
-
-def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_mask=None, mov_mask=None):
-    """
-    Visualize the registration results by displaying reference, initial moving, and aligned images.
-    Also displays difference images and overlays for qualitative assessment.
+    Recursive function to search for the best alignment using MNCC.
     
     Parameters:
-    - ref_image: NumPy array, reference image.
-    - initial_moving_image: NumPy array, moving image before alignment.
-    - aligned_image: NumPy array, moving image after alignment.
-    - ref_mask: NumPy boolean array, mask for reference image (optional).
-    - mov_mask: NumPy boolean array, mask for moving image (optional).
+        norm_ref (np.ndarray): Normalized reference image
+        ref_mask (np.ndarray): Reference mask as float [0,1]
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask as bool
+        points_per_dim (int): Number of points to evaluate per dimension
+        scale_factor (float): Factor to scale bounds by for next recursion
+        max_recursions (int): Maximum recursion depth
+        current_recursion (int): Current recursion depth
+        prev_best_dy (float): Best dy from previous recursion
+        prev_best_dx (float): Best dx from previous recursion
+        
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
     """
+    # Compute current bounds based on recursion level
+    bound_width = 2.0 * (scale_factor ** current_recursion)
+    bounds_y = (prev_best_dy - bound_width/2, prev_best_dy + bound_width/2)
+    bounds_x = (prev_best_dx - bound_width/2, prev_best_dx + bound_width/2)
+    print(f"recursive_mncc_search::bound_width {bound_width}, current_recursion {current_recursion}")
+    print(f"recursive_mncc_search::prev_best_dy {prev_best_dy} prev_best_dx {prev_best_dx}")
+    print(f"recursive_mncc_search::bounds_y {bounds_y} bounds_x {bounds_x}")
 
-    # Compute difference images
-    difference_initial = np.abs(min_max_scale(ref_image) - min_max_scale(initial_moving_image))
-    difference_aligned = np.abs(min_max_scale(ref_image) - min_max_scale(aligned_image))
-    ratio = np.sum(difference_aligned) / np.sum(difference_initial)
-    difference_initial = transform.rescale(difference_initial, (3, 3), order=4, mode='reflect', anti_aliasing=True)
-    difference_aligned = transform.rescale(difference_aligned, (3, 3), order=4, mode='reflect', anti_aliasing=True)
-    print(f"diff unaligned {np.sum(difference_initial)}, diff aligned {np.sum(difference_aligned)} ratio = {ratio}")
+    # Compute best shift for current grid
+    best_dy, best_dx, best_score = compute_grid_mncc(
+        norm_ref, ref_mask, template_image, template_mask,
+        bounds_y, bounds_x, points_per_dim
+    )
+    print(f"recursive_mncc_search::best_score {best_score}")
     
-    # Normalize difference images for better visualization
-    difference_initial_norm = (difference_initial - difference_initial.min()) / (difference_initial.max() - difference_initial.min() + 1e-8)
-    difference_aligned_norm = (difference_aligned - difference_aligned.min()) / (difference_aligned.max() - difference_aligned.min() + 1e-8)
-    #print(np.sum(difference_initial_norm), np.sum(difference_aligned_norm))
-    print(f"difference_initial_norm {np.sum(difference_initial_norm)}, difference_aligned_norm {np.sum(difference_aligned_norm)} ratio = {np.sum(difference_aligned_norm) / np.sum(difference_initial_norm)}")
-    if ratio < 1.0:
-        return             
-    # Create overlays
-    overlay_initial = np.stack([ref_image, initial_moving_image, np.zeros_like(ref_image)], axis=-1).astype(np.float32)
-    overlay_aligned = np.stack([ref_image, aligned_image, np.zeros_like(ref_image)], axis=-1).astype(np.float32)
+    # Base case: reached maximum recursions
+    if current_recursion >= max_recursions - 1:
+        return best_dy, best_dx
     
-    # Normalize overlays to [0, 1]
-    overlay_initial_norm = (overlay_initial - overlay_initial.min()) / (overlay_initial.max() - overlay_initial.min() + 1e-8)
-    overlay_aligned_norm = (overlay_aligned - overlay_aligned.min()) / (overlay_aligned.max() - overlay_aligned.min() + 1e-8)
+    # Recursive case: continue search with refined bounds
+    return recursive_mncc_search(
+        norm_ref, ref_mask, template_image, template_mask,
+        points_per_dim, scale_factor, max_recursions,
+        current_recursion + 1, best_dy, best_dx
+    )
+
+def compute_shift_ncc(ref_image, template_image, ref_mask, template_mask, 
+                      points_per_dim=5, max_recursions=8):
+    """
+    Main function to compute the best shift between reference and template images using MNCC.
     
-    # Plotting
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    Parameters:
+        ref_image (np.ndarray): Reference image
+        template_image (np.ndarray): Template image to be aligned
+        ref_mask (np.ndarray): Reference mask (binary)
+        template_mask (np.ndarray): Template mask (binary)
+        points_per_dim (int): Number of points to evaluate per dimension
+        max_recursions (int): Maximum number of recursive calls
     
-    # Reference Image
-    axes[0, 0].imshow(ref_image, cmap='gray')
-    axes[0, 0].set_title('Reference Image')
-    axes[0, 0].axis('off')
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
+    """
+    if points_per_dim < 3:
+        raise ValueError("points_per_dim must be at least 3")
+    if max_recursions < 3:
+        raise ValueError("max_recursions must be at least 3")
     
-    # Initial Moving Image
-    axes[0, 1].imshow(initial_moving_image, cmap='gray')
-    axes[0, 1].set_title('Initial Moving Image')
-    axes[0, 1].axis('off')
+    # Convert masks to float
+    ref_mask_float = ref_mask.astype(float)
     
-    # Aligned Moving Image
-    axes[0, 2].imshow(aligned_image, cmap='gray')
-    axes[0, 2].set_title('Aligned Moving Image')
-    axes[0, 2].axis('off')
+    # Pre-compute normalized reference image statistics
+    weight_sum = np.sum(ref_mask_float)
+    if weight_sum == 0:
+        return 0.0, 0.0
+        
+    mu_ref = np.sum(ref_image * ref_mask_float) / weight_sum
+    sigma_ref = np.sqrt(np.sum(ref_mask_float * (ref_image - mu_ref) ** 2) / weight_sum)
     
-    # Difference Images
-    axes[0, 3].imshow(difference_initial_norm, cmap='hot')
-    axes[0, 3].set_title('Difference: Initial')
-    axes[0, 3].axis('off')
+    if sigma_ref == 0:
+        return 0.0, 0.0
+        
+    norm_ref = (ref_image - mu_ref) / sigma_ref
     
-    # Overlays
-    axes[1, 0].imshow(overlay_initial_norm)
-    axes[1, 0].set_title('Overlay: Reference & Initial')
-    axes[1, 0].axis('off')
+    # Calculate scale factor based on points_per_dim
+    # For example, if points_per_dim = 4, scale_factor ≈ 0.5
+    # if points_per_dim = 5, scale_factor ≈ 0.25
+    scale_factor = 1.0 / (points_per_dim - 2)
+    if scale_factor < 0.25:
+        scale_factor = 0.25
+    if scale_factor >= 1.0:
+        scale_factor = 0.9
     
-    axes[1, 1].imshow(overlay_aligned_norm)
-    axes[1, 1].set_title('Overlay: Reference & Aligned')
-    axes[1, 1].axis('off')
-    
-    # Difference after alignment
-    axes[1, 2].imshow(difference_aligned_norm, cmap='hot')
-    axes[1, 2].set_title('Difference: Aligned')
-    axes[1, 2].axis('off')
-    
-    # Optionally, display masks if provided
-    if ref_mask is not None and mov_mask is not None:
-        combined_mask = ref_mask & mov_mask
-        axes[1, 3].imshow(combined_mask, cmap='gray')
-        axes[1, 3].set_title('Combined Mask')
-        axes[1, 3].axis('off')
-    else:
-        # Hide the subplot if masks are not provided
-        axes[1, 3].axis('off')
-    
-    plt.tight_layout()
-    plt.show()
+    # Start recursive search
+    return recursive_mncc_search(
+        norm_ref, ref_mask_float, template_image, template_mask,
+        points_per_dim, scale_factor, max_recursions
+    )
 
 
 
