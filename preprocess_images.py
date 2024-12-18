@@ -7,7 +7,7 @@ from skimage.transform import SimilarityTransform
 from skimage.feature import ORB, match_descriptors
 from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift as ndi_shift
-
+import registration_metrics as rm
 import torch
 import torch.nn.functional as F
 import os
@@ -16,122 +16,7 @@ import json
 import time
 
 
-def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu'):
-    # Input validation
-    assert ref_image.shape[:2] == mov_image.shape[:2], "Images must have same dimensions"
-    assert ref_mask.shape == mov_mask.shape, "Masks must have same dimensions"
-    
-    # combine the two masks in order to only consider valid pixels
-    combined_mask = ref_mask.astype(float) * mov_mask.astype(float)
-    # Apply masks to input images
-    ref_masked = ref_image * combined_mask
-    mov_masked = mov_image * combined_mask
-    
-    # Extract features using the model (which handles grayscale conversion)
-    with torch.no_grad():
-        ref_features = model(ref_masked)
-        mov_features = model(mov_masked)
-    
-    # Ensure consistent feature ordering
-    if isinstance(ref_features, dict):
-        feature_names = sorted(ref_features.keys())
-        ref_features = [ref_features[name] for name in feature_names]
-        mov_features = [mov_features[name] for name in feature_names]
-    
-    # Initialize loss tracking
-    total_loss = 0.0
-    diff_features = {}
-    # Weights for VGG19 layers ['0', '5', '10', '19', '28']
-    # Layer 0: First conv layer - highest detail
-    # Layer 5: End of first conv block
-    # Layer 10: End of second conv block
-    # Layer 19: Deep in third conv block
-    # Layer 28: Deep features
-    layer_weights = [1.0, 0.8, 0.6, 0.4, 0.2]  # Decreasing weights for deeper layers
-    
-    # Process each layer with proper mask handling
-    for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
-        _, C, Hf, Wf = ref_feat.shape
-        
-        # Resize mask to match feature map size
-        mask_resized = transform.resize(
-            combined_mask,
-            (Hf, Wf),
-            order=1,  # Use bilinear interpolation for mask
-            mode='constant',
-            cval=0,
-            anti_aliasing=True,
-            preserve_range=True
-        ).astype(np.float32)
-        
-        # Convert mask to tensor and expand to match feature dimensions
-        mask_tensor = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(device)
-        mask_expanded = mask_tensor.expand_as(ref_feat)
-        
-        # Apply mask to features
-        ref_feat_masked = ref_feat * mask_expanded
-        mov_feat_masked = mov_feat * mask_expanded
-        
-        # Calculate valid pixels for this layer
-        num_valid = torch.sum(mask_expanded)
-        if num_valid > 0:
-            # Compute masked L1 loss directly on feature values
-            layer_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid
-            
-            # Store feature differences for visualization
-            l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)
-            l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid
-            diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()
-            
-            # Apply layer weight
-            weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
-            total_loss += weight * layer_loss.item()
-    
-    # Normalize by sum of weights
-    total_loss /= sum(layer_weights[:len(ref_features)])
-    
-    return total_loss, diff_features
 
-def compute_masked_ncc(ref_image, template_image, ref_mask, template_mask):
-    """
-    Compute the Weighted Normalized Cross-Correlation (NCC) between two images.
-
-    Parameters:
-        ref_image (np.ndarray): Reference image array.
-        template_image (np.ndarray): Shifted template image array.
-        ref_mask (np.ndarray): Reference mask array with values between 0 and 1.
-        template_mask (np.ndarray): Template mask array with values between 0 and 1.
-
-    Returns:
-        float: Weighted NCC value.
-    """
-    # Compute combined weights
-    weights = ref_mask.astype(float) * template_mask.astype(float)
-
-    # Sum of weights
-    weight_sum = np.sum(weights)
-    if weight_sum == 0:
-        return np.nan  # or handle as appropriate
-
-    # Compute weighted means
-    mu_ref = np.sum(ref_image * weights) / weight_sum
-    mu_template = np.sum(template_image * weights) / weight_sum
-
-    # Compute weighted standard deviations
-    sigma_ref = np.sqrt(np.sum(weights * (ref_image - mu_ref) ** 2) / weight_sum)
-    sigma_template = np.sqrt(np.sum(weights * (template_image - mu_template) ** 2) / weight_sum)
-
-    # Avoid division by zero
-    if sigma_ref == 0 or sigma_template == 0:
-        return np.nan  # or handle as appropriate
-
-    # Compute weighted covariance
-    covariance = np.sum(weights * (ref_image - mu_ref) * (template_image - mu_template)) / weight_sum
-
-    # Compute weighted NCC
-    ncc = covariance / (sigma_ref * sigma_template)
-
-    return ncc
 
 def compute_sum_of_layers(diff_features, normalize=True):
     """
@@ -232,133 +117,6 @@ def min_max_scale(image):
     max_val = np.max(image)
     scaled_image = (image - min_val) / (max_val - min_val + 1e-8)  # Avoid division by zero
     return scaled_image
-
-
-# Normalize image to zero mean and unit std_dev
-def normalize_masked_array(masked_array):
-    epsilon = 1e-8
-    mean = np.mean(masked_array)
-    std = np.std(masked_array)
-    if std == 0:
-        raise ValueError("Standard deviation is zero. Cannot normalize an array with constant values.")
-    normalized_array = (masked_array - mean) / (std + epsilon)
-    return normalized_array
-
-
-def compute_mse(image1, mask1, image2, mask2, use_masks=True, normalize=True):
-    #only consider pixels that are valid in both images, so we "and" the masks
-
-    if use_masks:
-        combined_mask = np.logical_and(mask1, mask2)
-        # Apply the combined mask to both images
-        masked_image1 = image1[combined_mask]
-        masked_image2 = image2[combined_mask]
-    else:
-        masked_image1 = image1
-        masked_image2 = image2
-
-    # Normalize both masked images
-    if normalize:
-        normalized_image1 = normalize_masked_array(masked_image1)
-        normalized_image2 = normalize_masked_array(masked_image2)
-        return np.mean((normalized_image1 - normalized_image2) ** 2)
-    else:
-        return np.mean((masked_image1 - masked_image2) ** 2)
-
-def compute_ml1e(image1, mask1, image2, mask2, use_masks=True, normalize=True):
-    #only consider pixels that are valid in both images, so we "and" the masks
-
-    if use_masks:
-        combined_mask = np.logical_and(mask1, mask2)
-        # Apply the combined mask to both images
-        masked_image1 = image1[combined_mask]
-        masked_image2 = image2[combined_mask]
-    else:
-        masked_image1 = image1
-        masked_image2 = image2
-
-    # Normalize both masked images
-    if normalize:
-        normalized_image1 = normalize_masked_array(masked_image1)
-        normalized_image2 = normalize_masked_array(masked_image2)
-        return np.mean((normalized_image1 - normalized_image2) ** 2)
-    else:
-        return np.mean(np.abs(masked_image1 - masked_image2))
-    
-def compute_ssim(image1, mask1, image2, mask2, use_masks=True, normalize=True):
-    """
-    Compute the Structural Similarity Index Measure (SSIM) between two images,
-    optionally considering only the overlapping valid regions defined by masks.
-
-    Parameters:
-    - image1 (np.ndarray): First image array, shape (H, W) or (H, W, C).
-    - mask1 (np.ndarray): Boolean mask for the first image, shape (H, W).
-    - image2 (np.ndarray): Second image array, shape (H, W) or (H, W, C).
-    - mask2 (np.ndarray): Boolean mask for the second image, shape (H, W).
-    - use_masks (bool): If True, only consider pixels where both masks are True.
-    - normalize (bool): If True, normalize the masked images before computing SSIM.
-
-    Returns:
-    - ssim_value (float): The computed SSIM.
-
-    Raises:
-    - ValueError: If there are no overlapping valid pixels when `use_masks` is True.
-    - ValueError: If input images and masks have incompatible shapes.
-    """
-    # Ensure both images have the same spatial dimensions
-    if image1.shape[:2] != image2.shape[:2]:
-        raise ValueError("Reference and moving images must have the same height and width.")
-    if mask1.shape != mask2.shape:
-        raise ValueError("Reference and moving masks must have the same height and width.")
-
-    # Combine masks to focus on overlapping valid regions
-    if use_masks:
-        combined_mask = np.logical_and(mask1, mask2)  # Shape: (H, W)
-        if not np.any(combined_mask):
-            raise ValueError("No overlapping valid pixels found between the masks.")
-        # Apply the combined mask to both images
-        masked_image1 = image1.copy()
-        masked_image2 = image2.copy()
-        masked_image1[~combined_mask] = 0
-        masked_image2[~combined_mask] = 0
-    else:
-        masked_image1 = image1
-        masked_image2 = image2
-
-    # Normalize images if required
-    if normalize:
-        masked_image1 = normalize_masked_array(masked_image1)
-        masked_image2 = normalize_masked_array(masked_image2)
-
-    # Determine the data range
-    # Option A: If images are known to be in [0, 1]
-    # data_range = 1.0
-
-    # Option B: If images are in [0, 255]
-    # data_range = 255.0
-
-    # Option C: Compute based on image data
-    # Choose one based on your data
-
-    # Here, we choose Option C to make the function flexible
-    data_min = min(masked_image1.min(), masked_image2.min())
-    data_max = max(masked_image1.max(), masked_image2.max())
-    data_range = data_max - data_min
-
-    if data_range <= 0:
-        raise ValueError("Data range must be positive.")
-
-    # Handle grayscale and multichannel images
-    if masked_image1.ndim == 2:
-        # Grayscale images
-        ssim_value = ssim(masked_image1, masked_image2, data_range=data_range)
-    elif masked_image1.ndim == 3 and masked_image1.shape[2] in [1, 3, 4]:
-        # Multichannel images (e.g., RGB)
-        ssim_value = ssim(masked_image1, masked_image2, data_range=data_range, multichannel=True)
-    else:
-        raise ValueError("Input images must have shape (H, W), (H, W, 1), (H, W, 3), or (H, W, 4)")
-
-    return ssim_value
 
 
 def process_image_for_display(image, p2=1, p98=99):
@@ -672,13 +430,12 @@ def compute_grid_pl(model, ref_image, ref_mask, template_image, template_mask,
             shifted_mask = (shifted_mask > 0.5).astype(float)
             
             # Compute perceptual loss between reference and shifted template
-            pl_score, _ = compute_perceptual_loss(
-                model=model,
+            pl_score, _ = rm.compute_perceptual_loss(
                 ref_image=ref_image,
                 mov_image=shifted_template,
                 ref_mask=ref_mask,
                 mov_mask=shifted_mask,
-                device=model.hardware
+                model=model
             )
             
             if pl_score < best_score:
@@ -797,91 +554,173 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
     print(f"point matching shift_yx {shift_yx}")
     return shift_yx
 
+def compute_shift_with_metric(metric_fn, minimize=True, ref_image=None, template_image=None, 
+                            ref_mask=None, template_mask=None, points_per_dim=3, max_recursions=3, 
+                            **metric_kwargs):
+    """
+    Generic function to compute the best shift between reference and template images using
+    any provided metric function.
+    
+    Parameters:
+        metric_fn: Function that computes the similarity/difference metric
+                  Should have signature: metric_fn(ref_image, template_image, ref_mask, template_mask, **kwargs)
+        minimize: Boolean indicating whether to minimize (True) or maximize (False) the metric
+        ref_image (np.ndarray): Reference image
+        template_image (np.ndarray): Template image to be aligned
+        ref_mask (np.ndarray): Reference mask (binary)
+        template_mask (np.ndarray): Template mask (binary)
+        points_per_dim (int): Number of points to evaluate per dimension
+        max_recursions (int): Maximum number of recursive calls
+        **metric_kwargs: Additional keyword arguments to pass to the metric function
+    
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
+    """
+    # Calculate scale factor based on points_per_dim
+    scale_factor = 1.0 / (points_per_dim - 1)
+    if scale_factor < 0.25:
+        scale_factor = 0.25
+    if scale_factor >= 1.0:
+        scale_factor = 0.9
+    
+    # Start recursive search with the generic metric
+    return recursive_metric_search(
+        metric_fn=metric_fn,
+        minimize=minimize,
+        ref_image=ref_image,
+        ref_mask=ref_mask,
+        template_image=template_image,
+        template_mask=template_mask,
+        points_per_dim=points_per_dim,
+        scale_factor=scale_factor,
+        max_recursions=max_recursions,
+        **metric_kwargs
+    )
 
+def recursive_metric_search(metric_fn, minimize, ref_image, ref_mask, template_image, template_mask, 
+                          points_per_dim, scale_factor, max_recursions, current_recursion=0,
+                          prev_best_dy=0.0, prev_best_dx=0.0, **metric_kwargs):
+    """
+    Recursive function to search for the best alignment using any metric function.
+    
+    Parameters:
+        metric_fn: Function that computes the similarity/difference metric
+        minimize: Boolean indicating whether to minimize or maximize the metric
+        ref_image (np.ndarray): Reference image
+        ref_mask (np.ndarray): Reference mask
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask
+        points_per_dim (int): Number of points to evaluate per dimension
+        scale_factor (float): Factor to scale bounds by for next recursion
+        max_recursions (int): Maximum recursion depth
+        current_recursion (int): Current recursion depth
+        prev_best_dy (float): Best dy from previous recursion
+        prev_best_dx (float): Best dx from previous recursion
+        **metric_kwargs: Additional arguments to pass to metric_fn
+        
+    Returns:
+        tuple: Best shift (delta_y, delta_x)
+    """
+    # Compute current bounds based on recursion level
+    bound_width = 2.0 * (scale_factor ** current_recursion)
+    bounds_y = (prev_best_dy - bound_width/2, prev_best_dy + bound_width/2)
+    bounds_x = (prev_best_dx - bound_width/2, prev_best_dx + bound_width/2)
 
-def iterative_align_refinement_with_perceptual_loss(
-    model,
-    ref_image,
-    ref_mask,
-    original_moving_image,
-    original_moving_mask,
-    max_iterations=10,
-    shift_dampening=1.0,
-    debug=False
-):
-    total_shift_y = 0.0
-    total_shift_x = 0.0
-    shifts_history = [(0.0, 0.0)]
-    pl_history = []
-    mse_history = []
-    ssim_history = []
+    print(f"recursive_metric_search::bound_width {bound_width}, current_recursion {current_recursion}")
+    print(f"recursive_metric_search::prev_best_dy {prev_best_dy} prev_best_dx {prev_best_dx}")
+    print(f"recursive_metric_search::bounds_y {bounds_y} bounds_x {bounds_x}")
+    
+    # Compute best shift for current grid
+    best_dy, best_dx, best_score = compute_grid_metric(
+        metric_fn=metric_fn,
+        minimize=minimize,
+        ref_image=ref_image,
+        ref_mask=ref_mask,
+        template_image=template_image,
+        template_mask=template_mask,
+        bounds_y=bounds_y,
+        bounds_x=bounds_x,
+        points_per_dim=points_per_dim,
+        **metric_kwargs
+    )
+    
+    print(f"recursive_metric_search::best_score {best_score}, best_dy {best_dy}, best_dx {best_dx}")
+    
+    # Base case: reached maximum recursions
+    if current_recursion >= max_recursions - 1:
+        return best_dy, best_dx
+    
+    # Recursive case: continue search with refined bounds
+    return recursive_metric_search(
+        metric_fn=metric_fn,
+        minimize=minimize,
+        ref_image=ref_image,
+        ref_mask=ref_mask,
+        template_image=template_image,
+        template_mask=template_mask,
+        points_per_dim=points_per_dim,
+        scale_factor=scale_factor,
+        max_recursions=max_recursions,
+        current_recursion=current_recursion + 1,
+        prev_best_dy=best_dy,
+        prev_best_dx=best_dx,
+        **metric_kwargs
+    )
 
-    for iteration in range(max_iterations):
-        #print(f"\n--- Iteration {iteration} ---")
-
-        if iteration == 0:
-            shifted_image = original_moving_image
-            shifted_mask = original_moving_mask.astype(float)
-        else:
-            # Apply the accumulated shift to the original moving image
-            shifted_image = ndi_shift(
-                original_moving_image,
-                shift=(total_shift_y, total_shift_x),
-                mode='reflect',
-                order=3
+def compute_grid_metric(metric_fn, minimize, ref_image, ref_mask, template_image, template_mask, 
+                       bounds_y, bounds_x, points_per_dim, **metric_kwargs):
+    """
+    Compute metric scores for a grid of points within given bounds.
+    
+    Parameters:
+        metric_fn: Function that computes the similarity/difference metric
+        minimize: Boolean indicating whether to minimize or maximize the metric
+        ref_image (np.ndarray): Reference image
+        ref_mask (np.ndarray): Reference mask
+        template_image (np.ndarray): Template image to be aligned
+        template_mask (np.ndarray): Template mask
+        bounds_y (tuple): (min_y, max_y) bounds for vertical shifts
+        bounds_x (tuple): (min_x, max_x) bounds for horizontal shifts
+        points_per_dim (int): Number of points to evaluate per dimension
+        **metric_kwargs: Additional arguments to pass to metric_fn
+        
+    Returns:
+        tuple: (best_shift_y, best_shift_x, best_score)
+    """
+    min_y, max_y = bounds_y
+    min_x, max_x = bounds_x
+    
+    # Generate grid points
+    y_points = np.linspace(min_y, max_y, points_per_dim)
+    x_points = np.linspace(min_x, max_x, points_per_dim)
+    
+    best_score = float('inf') if minimize else float('-inf')
+    best_shift = (0.0, 0.0)
+    
+    # Evaluate metric at each grid point
+    for dy in y_points:
+        for dx in x_points:
+            # Shift template image and mask
+            shifted_template = ndi_shift(template_image, (dy, dx), mode='constant', order=3)
+            shifted_mask = ndi_shift(template_mask.astype(float), (dy, dx), 
+                                   mode='constant', order=1)
+            shifted_mask = (shifted_mask > 0.5).astype(float)
+            
+            # Compute metric between reference and shifted template
+            score = metric_fn(
+                ref_image=ref_image,
+                mov_image=shifted_template,
+                ref_mask=ref_mask,
+                mov_mask=shifted_mask,
+                **metric_kwargs
             )
-            shifted_mask = ndi_shift(
-                original_moving_mask.astype(float),
-                shift=(total_shift_y, total_shift_x),
-                mode='constant',
-                order=3
-            )
-        shifted_mask = shifted_mask > 0.5  # Re-binarize the mask
-
-        # Compute perceptual loss between reference and shifted moving image
-        perceptual_loss, diff_features = compute_perceptual_loss(model, ref_image, shifted_image, ref_mask, shifted_mask, model.hardware, False)
-        mse = compute_mse(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True, normalize=True)
-        ssim_score = compute_ssim(ref_image, ref_mask, shifted_image, shifted_mask, use_masks=True)
-
-        print(
-            f"Iteration {iteration}: Shift=({float(total_shift_y):.4f}, {float(total_shift_x):.4f}), Perceptual Loss={perceptual_loss:.6f}, MSE={mse:.6f}, SSIM={ssim_score:.8f}")
-        pl_history.append(perceptual_loss)
-        mse_history.append(mse)
-        ssim_history.append(ssim_score)
-
-        #i have different way of applying the mask to the image before computing the phase cross correlation
-        #for some corner cases where there are a lot of invalid pixels, fully blacking out the masked pixels 
-        #results in very wrong results. Weighting them by half seems like it is an ok compromise. Needs more testing though.
-        ref_masked = ref_image * (ref_mask.astype(ref_image.dtype) * 0.5 + 0.5)
-        mov_masked = shifted_image * (shifted_mask.astype(shifted_image.dtype) * 0.5 + 0.5)
-        #completely black out the masked pixels
-        #ref_masked = ref_image * ref_mask.astype(ref_image.dtype)
-        #mov_masked = shifted_image * shifted_mask.astype(shifted_image.dtype)
-        #do not mask the pixels at all
-        #ref_masked = ref_image 
-        #mov_masked = shifted_image
-
-        #don't bother estimating the shift on the final iterations of the loop because we won't use it
-        if iteration < max_iterations - 1:
-            #find the best alignment
-            shift_yx, error, diffphase = phase_cross_correlation(
-                ref_masked,
-                mov_masked,
-                upsample_factor=2**(iteration+2)
-            )
-            delta_y, delta_x = shift_yx
-
-
-            # Apply shift dampening to prevent overshooting
-            dampened_shift_y = delta_y * shift_dampening
-            dampened_shift_x = delta_x * shift_dampening
-
-            # Accumulate shifts
-            total_shift_y += dampened_shift_y
-            total_shift_x += dampened_shift_x
-            shifts_history.append((total_shift_y, total_shift_x))
-
-    return shifts_history, pl_history, mse_history, ssim_history
+            
+            # Update best score based on minimization/maximization
+            if (minimize and score < best_score) or (not minimize and score > best_score):
+                best_score = score
+                best_shift = (dy, dx)
+    
+    return best_shift[0], best_shift[1], best_score
 
 
 # Define a function to create the 3x2 grid of plots
@@ -1169,6 +1008,7 @@ def preprocess_imgset(base_dir, feature_extractor):
 
         #unmasked = np.ones(hr_downscaled.shape).astype(np.bool)
         # Align LR to the downscaled HR reference
+        #we need to come up with a different way to do this
         shifts_history, loss_history, mse_history, ssim_history = iterative_align_refinement_with_perceptual_loss(
             model=feature_extractor,
             ref_image=hr_downscaled,

@@ -21,12 +21,9 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import registration_helpers as rh
 import preprocess_images as ppi
+import registration_metrics as rm
 from heatmap_canvas import HeatmapCanvas
 from VGGFeatureExtractor import VGGFeatureExtractor
-# Add these imports at the top
-from skimage.metrics import structural_similarity as ssim
-from skimage.metrics import normalized_mutual_information as nmi
-
 
 # Corrected logging configuration to suppress DEBUG messages
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -759,22 +756,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.ref_image_array is None or shifted_template is None:
             return None, None, None
 
-        # Create combined mask
-        combined_mask = self.ref_mask_array * shifted_mask
-        
-        # Compute metrics only on masked regions
-        ref_masked = self.ref_image_array * combined_mask
-        template_masked = shifted_template * combined_mask
-
         # Compute SSIM using original intensity values
-        ssim_val = ssim(ref_masked, template_masked, 
-                       data_range=ref_masked.max() - ref_masked.min())
+        ssim_val = rm.compute_ssim(self.ref_image_array, shifted_template, 
+                                   self.ref_mask_array, shifted_mask)
         
         # Compute NMI using original intensity values
-        nmi_val = nmi(ref_masked, template_masked)
+        nmi_val = rm.compute_mutual_information(self.ref_image_array, shifted_template, 
+                                                self.ref_mask_array, shifted_mask)
         
         # NCC typically benefits from normalization, so keep as is
-        ncc_val = ppi.compute_masked_ncc(self.ref_image_array, shifted_template, 
+        ncc_val = rm.compute_masked_ncc(self.ref_image_array, shifted_template, 
                                          self.ref_mask_array, shifted_mask)
 
         return ssim_val, nmi_val, ncc_val
@@ -926,7 +917,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Compute Mean Squared Error between reference and shifted template images.
         """
-        ml1e = ppi.compute_ml1e(self.ref_image_array, self.ref_mask_array, shifted_template, shifted_template_mask)
+        ml1e = rm.compute_ml1e(self.ref_image_array, self.ref_mask_array, shifted_template, shifted_template_mask)
         return ml1e
 
     def compute_perceptual_loss(self, shifted_template, shifted_template_mask):
@@ -936,12 +927,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         # Placeholder: using ml1e as a stand-in
         #pl = self.compute_ml1e(shifted_template, shifted_template_mask)
-        pl, diff_features = ppi.compute_perceptual_loss(self.perceptual_loss_model,
+        pl, diff_features = rm.compute_perceptual_loss(
                                          self.ref_image_array,
                                          shifted_template,
                                          self.ref_mask_array,
                                          shifted_template_mask,
-                                         self.perceptual_loss_model.hardware)
+                                         self.perceptual_loss_model)
         return pl, diff_features
 
     def compute_and_apply_shift(self):
