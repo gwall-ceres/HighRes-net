@@ -3,17 +3,40 @@ import matplotlib.pyplot as plt
 from skimage import io, transform, img_as_float, exposure
 from skimage.metrics import structural_similarity as ssim
 from skimage.measure import ransac
-from skimage.transform import SimilarityTransform
+#from skimage.transform import SimilarityTransform, TranslationTransform
 from skimage.feature import ORB, match_descriptors
-from skimage.registration import phase_cross_correlation
+from skimage.registration import phase_cross_correlation, optical_flow_ilk
 from scipy.ndimage import shift as ndi_shift
 from torchvision import transforms
 import torch
 import torch.nn.functional as F
 import os
-import random
+import cv2
 import json
 import time
+
+class TranslationTransform:
+    def __init__(self):
+        self.params = None
+        self.translation = (0, 0)
+
+    def estimate(self, src, dst):
+        """Estimate translation from src to dst points."""
+        if src.shape != dst.shape:
+            return False
+        
+        # Compute mean translation
+        translation = np.mean(dst - src, axis=0)
+        self.params = np.array([[1, 0, translation[0]],
+                               [0, 1, translation[1]],
+                               [0, 0, 1]])
+        self.translation = translation
+        return True
+
+    def residuals(self, src, dst):
+        """Compute residuals between source and transformed destination points."""
+        transformed = src + self.translation
+        return np.sqrt(np.sum((transformed - dst) ** 2, axis=1))
 
 
 def compute_perceptual_loss(model, ref_image, mov_image, ref_mask, mov_mask, device='cpu'):
@@ -462,173 +485,6 @@ def process_image_for_display(image, p2=1, p98=99):
 
 
 
-
-def visualize_alignment2(ref_image, aligned_image, ref_mask, aligned_mask, shift_vector, suffix=''):
-    """
-    Visualize the alignment between the reference and aligned images along with their masks.
-    
-    Parameters:
-        ref_image (np.ndarray): Reference image array (grayscale or RGB), already processed for display.
-        aligned_image (np.ndarray): Aligned image array (grayscale or RGB), already processed for display.
-        ref_mask (np.ndarray): Binary mask for the reference image.
-        aligned_mask (np.ndarray): Binary mask for the aligned image.
-        shift_vector (tuple or list): Total shift applied (delta_y, delta_x).
-        suffix (str): Optional identifier for labeling.
-    """
-    # Ensure masks are binary and have the same shape as images
-    if ref_mask.ndim == 2:
-        ref_mask_display = ref_mask
-    else:
-        ref_mask_display = ref_mask[:, :, 0]  # Assuming single-channel masks
-    
-    if aligned_mask.ndim == 2:
-        aligned_mask_display = aligned_mask
-    else:
-        aligned_mask_display = aligned_mask[:, :, 0]
-    
-    # Create a figure with multiple subplots
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    
-    # Display Reference Image
-    axes[0, 0].imshow(ref_image, cmap='gray' if ref_image.ndim == 2 else None)
-    axes[0, 0].set_title('Reference Image')
-    axes[0, 0].axis('off')
-    
-    # Display Aligned Image
-    axes[0, 1].imshow(aligned_image, cmap='gray' if aligned_image.ndim == 2 else None)
-    axes[0, 1].set_title('Aligned Image')
-    axes[0, 1].axis('off')
-    
-    # Display Difference Image
-    if ref_image.ndim == 3:
-        # For RGB images, compute the mean difference across channels
-        difference = np.mean(np.abs(ref_image - aligned_image), axis=2)
-    else:
-        difference = np.abs(ref_image - aligned_image)
-    difference = process_image_for_display(difference)
-    axes[0, 2].imshow(difference, cmap='gray')
-    axes[0, 2].set_title('Difference Image')
-    axes[0, 2].axis('off')
-    
-    # Overlay Reference Mask on Reference Image
-    axes[1, 0].imshow(ref_image, cmap='gray' if ref_image.ndim == 2 else None)
-    axes[1, 0].imshow(ref_mask_display, cmap='jet', alpha=0.3)
-    axes[1, 0].set_title('Reference Image with Mask')
-    axes[1, 0].axis('off')
-    
-    # Overlay Aligned Mask on Aligned Image
-    axes[1, 1].imshow(aligned_image, cmap='gray' if aligned_image.ndim == 2 else None)
-    axes[1, 1].imshow(aligned_mask_display, cmap='jet', alpha=0.3)
-    axes[1, 1].set_title('Aligned Image with Mask')
-    axes[1, 1].axis('off')
-    
-    # Display Shift Information
-    axes[1, 2].axis('off')  # No image, just text
-    text = f"""
-    Alignment Summary
-    -----------------
-    Shift Applied:
-      Δy: {shift_vector[0]:.4f}
-      Δx: {shift_vector[1]:.4f}
-    Image Set: {suffix}
-    """
-    axes[1, 2].text(0.5, 0.5, text, fontsize=14, ha='center', va='center', wrap=True)
-    axes[1, 2].set_title('Shift Information')
-    
-    plt.tight_layout()
-    plt.show()
-
-
-
-
-def visualize_registration(ref_image, initial_moving_image, aligned_image, ref_mask=None, mov_mask=None):
-    """
-    Visualize the registration results by displaying reference, initial moving, and aligned images.
-    Also displays difference images and overlays for qualitative assessment.
-    
-    Parameters:
-    - ref_image: NumPy array, reference image.
-    - initial_moving_image: NumPy array, moving image before alignment.
-    - aligned_image: NumPy array, moving image after alignment.
-    - ref_mask: NumPy boolean array, mask for reference image (optional).
-    - mov_mask: NumPy boolean array, mask for moving image (optional).
-    """
-
-    # Compute difference images
-    difference_initial = np.abs(min_max_scale(ref_image) - min_max_scale(initial_moving_image))
-    difference_aligned = np.abs(min_max_scale(ref_image) - min_max_scale(aligned_image))
-    ratio = np.sum(difference_aligned) / np.sum(difference_initial)
-    difference_initial = transform.rescale(difference_initial, (3, 3), order=4, mode='reflect', anti_aliasing=True)
-    difference_aligned = transform.rescale(difference_aligned, (3, 3), order=4, mode='reflect', anti_aliasing=True)
-    print(f"diff unaligned {np.sum(difference_initial)}, diff aligned {np.sum(difference_aligned)} ratio = {ratio}")
-    
-    # Normalize difference images for better visualization
-    difference_initial_norm = (difference_initial - difference_initial.min()) / (difference_initial.max() - difference_initial.min() + 1e-8)
-    difference_aligned_norm = (difference_aligned - difference_aligned.min()) / (difference_aligned.max() - difference_aligned.min() + 1e-8)
-    #print(np.sum(difference_initial_norm), np.sum(difference_aligned_norm))
-    print(f"difference_initial_norm {np.sum(difference_initial_norm)}, difference_aligned_norm {np.sum(difference_aligned_norm)} ratio = {np.sum(difference_aligned_norm) / np.sum(difference_initial_norm)}")
-    if ratio < 1.0:
-        return             
-    # Create overlays
-    overlay_initial = np.stack([ref_image, initial_moving_image, np.zeros_like(ref_image)], axis=-1).astype(np.float32)
-    overlay_aligned = np.stack([ref_image, aligned_image, np.zeros_like(ref_image)], axis=-1).astype(np.float32)
-    
-    # Normalize overlays to [0, 1]
-    overlay_initial_norm = (overlay_initial - overlay_initial.min()) / (overlay_initial.max() - overlay_initial.min() + 1e-8)
-    overlay_aligned_norm = (overlay_aligned - overlay_aligned.min()) / (overlay_aligned.max() - overlay_aligned.min() + 1e-8)
-    
-    # Plotting
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    
-    # Reference Image
-    axes[0, 0].imshow(ref_image, cmap='gray')
-    axes[0, 0].set_title('Reference Image')
-    axes[0, 0].axis('off')
-    
-    # Initial Moving Image
-    axes[0, 1].imshow(initial_moving_image, cmap='gray')
-    axes[0, 1].set_title('Initial Moving Image')
-    axes[0, 1].axis('off')
-    
-    # Aligned Moving Image
-    axes[0, 2].imshow(aligned_image, cmap='gray')
-    axes[0, 2].set_title('Aligned Moving Image')
-    axes[0, 2].axis('off')
-    
-    # Difference Images
-    axes[0, 3].imshow(difference_initial_norm, cmap='hot')
-    axes[0, 3].set_title('Difference: Initial')
-    axes[0, 3].axis('off')
-    
-    # Overlays
-    axes[1, 0].imshow(overlay_initial_norm)
-    axes[1, 0].set_title('Overlay: Reference & Initial')
-    axes[1, 0].axis('off')
-    
-    axes[1, 1].imshow(overlay_aligned_norm)
-    axes[1, 1].set_title('Overlay: Reference & Aligned')
-    axes[1, 1].axis('off')
-    
-    # Difference after alignment
-    axes[1, 2].imshow(difference_aligned_norm, cmap='hot')
-    axes[1, 2].set_title('Difference: Aligned')
-    axes[1, 2].axis('off')
-    
-    # Optionally, display masks if provided
-    if ref_mask is not None and mov_mask is not None:
-        combined_mask = ref_mask & mov_mask
-        axes[1, 3].imshow(combined_mask, cmap='gray')
-        axes[1, 3].set_title('Combined Mask')
-        axes[1, 3].axis('off')
-    else:
-        # Hide the subplot if masks are not provided
-        axes[1, 3].axis('off')
-    
-    plt.tight_layout()
-    plt.show()
-
-
-
 def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     #i have different way of applying the mask to the image before computing the phase cross correlation
     #for some corner cases where there are a lot of invalid pixels, fully blacking out the masked pixels 
@@ -651,7 +507,100 @@ def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     return shift_yx
       
 
-def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_threshold=0.75, ransac_threshold=2, scale=4):
+def compute_shift_point_matching(ref_image, tmplt_image, ref_mask=None, tmplt_mask=None, 
+                               n_keypoints=500, match_threshold=0.75, 
+                               ransac_threshold=2, scale=4):
+    """
+    Aligns two images using point matching to estimate a subpixel shift.
+    
+    Parameters:
+    - ref_image: Reference image (numpy array)
+    - tmplt_image: Image to be aligned (numpy array)
+    - ref_mask: Optional mask for reference image
+    - tmplt_mask: Optional mask for template image
+    - n_keypoints: Number of keypoints to detect
+    - match_threshold: Threshold for Lowe's ratio test
+    - ransac_threshold: RANSAC inlier threshold in pixels
+    - scale: Scale factor for the images
+    
+    Returns:
+    - tuple: (shift_yx, success_flag, num_inliers)
+    """
+    try:
+        shape = ref_image.shape
+        # Upscale images and masks
+        image1 = transform.resize(img_as_float(ref_image),
+                                (shape[0]*scale, shape[1]*scale),
+                                order=3, mode='reflect',
+                                anti_aliasing=True, preserve_range=True)
+        
+        image2 = transform.resize(img_as_float(tmplt_image),
+                                (shape[0]*scale, shape[1]*scale),
+                                order=3, mode='reflect',
+                                anti_aliasing=True, preserve_range=True)
+
+        if ref_mask is not None and tmplt_mask is not None:
+            mask1 = transform.resize(ref_mask.astype(float),
+                                  (shape[0]*scale, shape[1]*scale),
+                                  order=0, mode='constant',
+                                  anti_aliasing=False)
+            mask2 = transform.resize(tmplt_mask.astype(float),
+                                  (shape[0]*scale, shape[1]*scale),
+                                  order=0, mode='constant',
+                                  anti_aliasing=False)
+            # Apply masks to images
+            image1 = image1 * (mask1 > 0.5)
+            image2 = image2 * (mask2 > 0.5)
+
+        # Initialize ORB detector with adaptive parameters
+        orb = ORB(n_keypoints=n_keypoints, 
+                 fast_threshold=min(0.05, 1.0/scale))  # Adjust threshold based on scale
+
+        # Detect and extract features
+        orb.detect_and_extract(image1)
+        keypoints1, descriptors1 = orb.keypoints, orb.descriptors
+
+        orb.detect_and_extract(image2)
+        keypoints2, descriptors2 = orb.keypoints, orb.descriptors
+
+        if descriptors1 is None or descriptors2 is None:
+            return (0, 0), False, 0
+
+        # Match descriptors
+        matches12 = match_descriptors(descriptors1, descriptors2, 
+                                    cross_check=True)
+
+        if len(matches12) < 4:
+            return (0, 0), False, 0
+
+        # Extract matched keypoints (maintaining original coordinate order)
+        src = keypoints1[matches12[:, 0]]  # Keep original order
+        dst = keypoints2[matches12[:, 1]]  # Keep original order
+
+        # Estimate translation using RANSAC with adaptive parameters
+        model_robust, inliers = ransac(
+            (dst, src),
+            TranslationTransform,
+            min_samples=2,
+            residual_threshold=ransac_threshold * scale,  # Scale threshold
+            max_trials=min(2000, len(matches12) * 4)
+        )
+
+        if model_robust is None:
+            return (0, 0)##, False, 0
+
+        # Extract and scale back the translation
+        shift_y, shift_x = model_robust.translation[1]/scale, model_robust.translation[0]/scale
+        num_inliers = np.sum(inliers)
+
+        return (shift_y, shift_x)##, True, num_inliers
+
+    except Exception as e:
+        print(f"Point matching failed: {str(e)}")
+        return (0, 0) ##, False, 0
+    
+
+def compute_shift_point_matching2(ref_image, tmplt_image, n_keypoints=500, match_threshold=0.75, ransac_threshold=2, scale=1):
     """
     Aligns two images using point matching to estimate a subpixel shift.
 
@@ -659,7 +608,7 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
     - ref_image: Reference image (numpy array).
     - tmplt_image: Image to be aligned (numpy array).
     - n_keypoints: Number of keypoints to detect.
-    - match_threshold: Threshold for Lowe's ratio test (not directly used here).
+    - match_threshold: Threshold for Lowe's ratio test.
     - ransac_threshold: RANSAC inlier threshold in pixels.
     - scale: Scale factor for the images.
 
@@ -676,7 +625,6 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
                 anti_aliasing=True,
                 preserve_range=True)
     
-
     image2 = transform.resize(
                 img_as_float(tmplt_image),
                 (shape[0]*scale, shape[1]*scale),
@@ -685,61 +633,242 @@ def compute_shift_point_matching(ref_image, tmplt_image, n_keypoints=500, match_
                 anti_aliasing=True,
                 preserve_range=True)
 
-    # Initialize ORB detector
-    orb = ORB(n_keypoints=n_keypoints, fast_threshold=0.05)
+    # Detect keypoints and descriptors using ORB with adjusted parameters
+    orb = cv2.ORB_create(
+        nfeatures=1000,          # Increased from default 500
+        scaleFactor=1.1,         # Smaller scale steps
+        nlevels=8,               # More scale levels
+        edgeThreshold=15,        # Increased from default
+        firstLevel=0,
+        WTA_K=2,
+        patchSize=31,           # Increased patch size for better features
+        fastThreshold=20        # Lower threshold to detect more features
+    )
+    kp1, des1 = orb.detectAndCompute(image1.astype(np.uint8), None)
+    kp2, des2 = orb.detectAndCompute(image2.astype(np.uint8), None)
 
-    # Detect and extract features from image1
-    orb.detect_and_extract(image1)
-    keypoints1 = orb.keypoints
-    descriptors1 = orb.descriptors
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        raise ValueError("Not enough keypoints detected in one or both images.")
 
-    # Detect and extract features from image2
-    orb.detect_and_extract(image2)
-    keypoints2 = orb.keypoints
-    descriptors2 = orb.descriptors
+    # Create BFMatcher object
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)  # Remove crossCheck=True when using knnMatch
+ 
+    # Match descriptors with k=2
+    matches = bf.knnMatch(des1, des2, k=2)
+    
+    # Print diagnostic information
+    print(f"Total matches found: {len(matches)}")
 
-    # Match descriptors using mutual nearest neighbors
-    matches12 = match_descriptors(descriptors1, descriptors2, cross_check=True)
+    # Apply ratio test and distance filter
+    good_matches = []
+    max_pixel_distance = 10  # Maximum allowed distance between matched points in pixels
+    
+    for m, n in matches:
+        # Get coordinates of matched keypoints
+        pt1 = np.array(kp1[m.queryIdx].pt)
+        pt2 = np.array(kp2[m.trainIdx].pt)
+        
+        # Calculate Euclidean distance between matched points
+        pixel_distance = np.linalg.norm(pt1 - pt2)
+        
+        # Apply both ratio test and distance threshold
+        if m.distance < 0.85 * n.distance and pixel_distance < max_pixel_distance:
+            good_matches.append(m)
 
-    if len(matches12) < 4:
-        raise ValueError("Not enough matches found for reliable alignment.")
+    print(f"Good matches after ratio test and distance filter: {len(good_matches)}")
 
-    # Extract matched keypoints
-    src = keypoints1[matches12[:, 0]][:, ::-1]  # (x, y)
-    dst = keypoints2[matches12[:, 1]][:, ::-1]  # (x, y)
+    # If not enough matches, try with more lenient thresholds
+    if len(good_matches) < 3:
+        good_matches = []
+        for m, n in matches:
+            pt1 = np.array(kp1[m.queryIdx].pt)
+            pt2 = np.array(kp2[m.trainIdx].pt)
+            pixel_distance = np.linalg.norm(pt1 - pt2)
+            
+            if m.distance < 0.9 * n.distance and pixel_distance < max_pixel_distance * 1.5:
+                good_matches.append(m)
+        
+        if len(good_matches) < 3:
+            raise ValueError(f"Not enough good matches found: {len(good_matches)}")
 
-    # Estimate translation using RANSAC
-    # Define a transformation model: translation only
-    model = SimilarityTransform(scale=1, rotation=0, translation=(0, 0))
+    # Extract matched keypoint coordinates
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+    
+    # Convert points from (x,y) to (y,x) format for RANSAC
+    src = np.column_stack([src_pts[:, 1], src_pts[:, 0]])  # Convert to (y,x)
+    dst = np.column_stack([dst_pts[:, 1], dst_pts[:, 0]])  # Convert to (y,x)
+
     try:
-        model_robust, inliers = ransac((dst, src),
-                                       SimilarityTransform,
-                                       min_samples=2,
-                                       residual_threshold=ransac_threshold,
-                                       max_trials=1000)
+        # Estimate translation using RANSAC with stricter parameters
+        model_robust, inliers = ransac(
+            (src, dst),
+            TranslationTransform,
+            min_samples=2,
+            residual_threshold=2.0,  # Stricter residual threshold
+            max_trials=1000
+        )
+
+        if model_robust is None:
+            raise ValueError("RANSAC failed to find a robust model.")
+
+        # Get the translation
+        shift_y, shift_x = model_robust.translation
+
+        # Additional sanity checks
+        if abs(shift_y) > max_pixel_distance or abs(shift_x) > max_pixel_distance:
+            print(f"Warning: Large shift detected ({shift_y:.2f}, {shift_x:.2f})")
+            # Fall back to median shift of inlier matches
+            if inliers is not None and np.any(inliers):
+                shifts = dst[inliers] - src[inliers]
+                median_shift = np.median(shifts, axis=0)
+                shift_y, shift_x = median_shift
+                print(f"Falling back to median shift: ({shift_y:.2f}, {shift_x:.2f})")
+            else:
+                shift_y, shift_x = 0, 0
+                print("Falling back to zero shift")
+
+        # Count inliers and compute inlier ratio
+        num_inliers = np.sum(inliers) if inliers is not None else 0
+        inlier_ratio = num_inliers / len(good_matches) if len(good_matches) > 0 else 0
+        print(f"Number of inliers: {num_inliers}, Inlier ratio: {inlier_ratio:.2f}")
+
+        # Final sanity check
+        if inlier_ratio < 0.3:  # Less than 30% inliers
+            print("Warning: Low inlier ratio, transformation might be unreliable")
+            if inlier_ratio < 0.1:  # Less than 10% inliers
+                shift_y, shift_x = 0, 0
+                print("Extremely low inlier ratio, falling back to zero shift")
+
     except Exception as e:
-        raise ValueError(f"RANSAC failed to find a robust model: {e}")
+        print(f"RANSAC failed: {e}")
+        shift_y, shift_x = 0, 0
+        print("Error in transformation estimation, falling back to zero shift")
 
-    if model_robust is None:
-        raise ValueError("RANSAC failed to find a robust model.")
-
-    # Extract translation
-    estimated_translation = model_robust.translation  # (tx, ty)
-
-    # Since SimilarityTransform includes both x and y translations,
-    # and we set rotation=0 and scale=1, we can directly use the translation components.
-    shift_x, shift_y = estimated_translation  # (x_shift, y_shift)
-
-    # Apply the estimated shift using scipy.ndimage.shift
-    # Note: shift expects (y, x) order
-    #aligned_image = ndi_shift(image2, shift=(-shift_y, -shift_x), mode='nearest', order=3)
-
-    # The total estimated shift is (y, x)
-    shift_yx = (shift_y/scale, shift_x/scale)
-    print(f"point matching shift_yx {shift_yx}")
-    return shift_yx
+    print(f"Final shift: ({shift_y:.2f}, {shift_x:.2f})")
+    return (shift_y, shift_x)
 
 
+def compute_shift_optical_flow_ilk(ref_image, tmplt_image, ref_mask=None, tmplt_mask=None):
+    """
+    Compute sub-pixel shift between two grayscale satellite images using optical flow.
+    Optimized for small displacements (< 1 pixel).
+    Uses TranslationTransform instead of SimilarityTransform to constrain to pure translation.
+    """
+    # Initialize masks if not provided
+    if ref_mask is None:
+        ref_mask = np.ones_like(ref_image)
+    if tmplt_mask is None:
+        tmplt_mask = np.ones_like(tmplt_image)
+
+    ref_image = transform.rescale(
+            ref_image,
+            scale=4,
+            order=3,  
+            anti_aliasing=True,
+            preserve_range=True  # Preserve the intensity range [0, 1]
+        )
+    
+    tmplt_image = transform.rescale(
+            tmplt_image,
+            scale=4,
+            order=3,  
+            anti_aliasing=True,
+            preserve_range=True  # Preserve the intensity range [0, 1]
+        )
+
+    ref_mask = transform.rescale(
+            ref_mask.astype(float),
+            scale=4,
+            order=3,  
+            anti_aliasing=True,
+            preserve_range=True  # Preserve the intensity range [0, 1]
+        )
+
+    tmplt_mask = transform.rescale(
+            tmplt_mask.astype(float),
+            scale=4,
+            order=3,  
+            anti_aliasing=True,
+            preserve_range=True  # Preserve the intensity range [0, 1]
+        )
+    
+    try:
+        # Compute optical flow
+        flow = optical_flow_ilk(ref_image, tmplt_image, radius=3)
+        flow_y, flow_x = flow
+        print(f"median flow_x {np.median(flow_x)}, median flow_y {np.median(flow_y)}")
+   
+        # Compute confidence weights based on image gradients
+        gy, gx = np.gradient(ref_image)
+        gradient_magnitude = np.sqrt(gx**2 + gy**2)
+        confidence_weights = gradient_magnitude / (gradient_magnitude.max() + 1e-6)
+        
+        # Combine with mask weights
+        combined_weights = confidence_weights * ref_mask * tmplt_mask
+
+        # Generate coordinate grid
+        nr, nc = ref_image.shape
+        col_coords, row_coords = np.meshgrid(np.arange(nc), np.arange(nr), indexing='xy')
+
+        # Create source points from coordinate grid where weights are significant
+        valid_points = combined_weights > 0.2
+        src_points = np.column_stack([
+            col_coords[valid_points],  # x coordinates
+            row_coords[valid_points]   # y coordinates
+        ])
+
+        # Create destination points by adding flow vectors
+        dst_points = src_points + np.column_stack([
+            flow_x[valid_points],  # x displacement
+            flow_y[valid_points]   # y displacement
+        ])
+
+        print(f"median flow_x {np.median(flow_x[valid_points])}, median flow_y {np.median(flow_y[valid_points])}")
+        
+        if len(src_points) > 10:
+            try:
+                # Fit translation model with RANSAC
+                model, inliers = ransac(
+                    (src_points, dst_points),
+                    TranslationTransform,  # Changed from SimilarityTransform
+                    min_samples=2,         # Translation only needs 2 points (was 3)
+                    residual_threshold=1.0,
+                    max_trials=100
+                )
+                
+                if model is not None and model.params is not None:
+                    shift_yx = (
+                        model.translation[1],  # y translation
+                        model.translation[0]   # x translation
+                    )
+                    print(f"ransac model shift_yx {shift_yx}")
+                else:
+                    # Fallback to weighted median
+                    shift_yx = (
+                        np.median(flow_y[valid_points]),
+                        np.median(flow_x[valid_points])
+                    )
+            except Exception as e:
+                print(f"RANSAC failed: {e}")
+                # Fallback to weighted median
+                shift_yx = (
+                    np.median(flow_y[valid_points]),
+                    np.median(flow_x[valid_points])
+                )
+        else:
+            # Not enough points for RANSAC
+            shift_yx = (
+                np.median(flow_y[valid_points]),
+                np.median(flow_x[valid_points])
+            )
+
+        print(f"Estimated shift: deltay={shift_yx[0]:.4f}, deltax={shift_yx[1]:.4f}")
+        return shift_yx
+
+    except Exception as e:
+        print(f"Optical flow failed: {e}")
+        return np.nan, np.nan
 
 def iterative_align_refinement_with_perceptual_loss(
     model,

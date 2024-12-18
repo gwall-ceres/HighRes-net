@@ -26,6 +26,7 @@ from VGGFeatureExtractor import VGGFeatureExtractor
 # Add these imports at the top
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import normalized_mutual_information as nmi
+import time  # Add at the top with other imports
 
 
 # Corrected logging configuration to suppress DEBUG messages
@@ -65,11 +66,6 @@ class MainWindow(QtWidgets.QMainWindow):
         load_template_mask_action = QtWidgets.QAction("Load Template Mask", self)
         load_template_mask_action.triggered.connect(lambda: self.load_image("template_mask"))
         file_menu.addAction(load_template_mask_action)
-
-        # New action for computing and applying the shift
-        #compute_shift_action = QtWidgets.QAction("Compute and Apply Shift", self)
-        #compute_shift_action.triggered.connect(self.compute_and_apply_shift)
-        #file_menu.addAction(compute_shift_action)
 
         toolbar = self.addToolBar("Main Toolbar")
     
@@ -782,6 +778,8 @@ class MainWindow(QtWidgets.QMainWindow):
         Shift the template image and its mask based on current_deltax and current_deltay,
         update the overlay image, and recompute ml1e and perceptual loss.
         """
+        start_total = time.perf_counter()
+        
         if self.template_image_array is None or self.ref_image_array is None:
             logging.warning("Cannot apply shift: Original Template or Reference image is None.")
             return
@@ -806,60 +804,58 @@ class MainWindow(QtWidgets.QMainWindow):
         # Total shifts
         total_shift_x = self.config["current_deltax"]
         total_shift_y = self.config["current_deltay"]
-        print(f"Total shift: X={total_shift_x}, Y={total_shift_y}")
-        self.shift_x_history.append(total_shift_x)
-        self.shift_y_history.append(total_shift_y)
-
-        # logging.debug(f"Applying total shift: Delta X={total_shift_x}, Delta Y={total_shift_y}")
-
-        shifted_image, shifted_mask = self.apply_shift_to_template(total_shift_x, total_shift_y)
-        # logging.debug("Applied shift to template mask and re-binarized.")
-
-        # Update the display pixmap with the shifted image
-        #shifted_display_arr = ppi.contrast_stretch_8bit(shifted_image)  # Apply contrast stretching for display
-        #self.template_display_pixmap = self.array_to_qpixmap(shifted_display_arr, is_grayscale=True)
-        # logging.debug("Updated template_display_pixmap with shifted and contrast-stretched image.")
-
-        # Update the overlay
-        self.update_overlay(shifted_image, shifted_mask)
-        # logging.debug("Updated overlay after shifting.")
-
-        # Compute Losses
-        ml1e = self.compute_ml1e(shifted_image, shifted_mask)
-         # Append to loss history
-        self.ml1e_history.append(ml1e)
-        pl, self.diff_features = self.compute_perceptual_loss(shifted_image, shifted_mask)
-        # logging.debug(f"Computed ml1e: {ml1e}, Perceptual Loss: {pl}")
-
-       
-        selected_choice = self.layer_dropdown.currentText()
         
-        if selected_choice == "Heatmap" or selected_choice == "Sum of Layers":
-            pass
-        else:
-            selected_layer = selected_choice.split(' ')[1]  # Extract layer number, e.g., "Layer 5"
-            #print(f"selected_layer = {selected_layer}")
-            if self.diff_features is not None:
-                activations = self.diff_features[selected_layer]
-                pl = np.sum(activations)
-                
+        # Time the shift operation
+        t0 = time.perf_counter()
+        shifted_image, shifted_mask = self.apply_shift_to_template(total_shift_x, total_shift_y)
+        t1 = time.perf_counter()
+        print(f"Shift operation took: {(t1-t0)*1000:.1f}ms")
+
+        # Time the overlay update
+        t0 = time.perf_counter()
+        self.update_overlay(shifted_image, shifted_mask)
+        t1 = time.perf_counter()
+        print(f"Overlay update took: {(t1-t0)*1000:.1f}ms")
+
+        # Time loss computations
+        t0 = time.perf_counter()
+        ml1e = self.compute_ml1e(shifted_image, shifted_mask)
+        self.ml1e_history.append(ml1e)
+        t1 = time.perf_counter()
+        print(f"ML1E computation took: {(t1-t0)*1000:.1f}ms")
+
+        t0 = time.perf_counter()
+        pl, self.diff_features = self.compute_perceptual_loss(shifted_image, shifted_mask)
+        t1 = time.perf_counter()
+        print(f"Perceptual loss computation took: {(t1-t0)*1000:.1f}ms")
+        
         self.pl_history.append(pl)
 
-        # After computing shifted_image and shifted_mask
+        # Time metrics computation
+        t0 = time.perf_counter()
         ssim_val, nmi_val, ncc_val = self.compute_registration_metrics(shifted_image, shifted_mask)
-        print(f"ssim_val = {ssim_val}, nmi_val = {nmi_val}, ncc_val = {ncc_val}")
-        # Append to histories
+        t1 = time.perf_counter()
+        print(f"Registration metrics computation took: {(t1-t0)*1000:.1f}ms")
+        
         self.ssim_history.append(ssim_val)
         self.nmi_history.append(nmi_val)
         self.ncc_history.append(ncc_val)
-    
-        # Update plots
-        self.update_plots()
-        # logging.debug("Updated ml1e and Perceptual Loss plots.")
 
-        # Update difference heatmap
+        # Time plot updates
+        t0 = time.perf_counter()
+        self.update_plots()
+        t1 = time.perf_counter()
+        print(f"Plot updates took: {(t1-t0)*1000:.1f}ms")
+
+        # Time heatmap computation and display
+        t0 = time.perf_counter()
         self.compute_and_display_heatmap(shifted_image, shifted_mask)
-        # logging.debug("Computed and displayed difference heatmap.")
+        t1 = time.perf_counter()
+        print(f"Heatmap computation and display took: {(t1-t0)*1000:.1f}ms")
+
+        end_total = time.perf_counter()
+        print(f"Total operation took: {(end_total-start_total)*1000:.1f}ms")
+        print("----------------------------------------")
 
     def apply_best_shift(self):
         """
@@ -968,15 +964,14 @@ class MainWindow(QtWidgets.QMainWindow):
         elif selected_choice == "Point Matching":
             shift_yx = ppi.compute_shift_point_matching(self.ref_image_array, shifted_image)
         elif selected_choice == "ILK Optical Flow":
-            shift_yx = ppi.compute_shift_ilk_optical_flow(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+            #shift_yx = ppi.compute_shift_optical_flow_ilk(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
+            shift_yx = ppi.compute_shift_point_matching2(self.ref_image_array, shifted_image)
         elif selected_choice == "TVL1 Optical Flow":
             shift_yx = ppi.compute_shift_tvl1_optical_flow(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
         else:
             shift_yx = [0, 0]
 
-        # Step 2: Compute the new shift using phase_cross_correlation
-        #shift_yx = ppi.compute_shift(self.ref_image_array, shifted_image, self.ref_mask_array, shifted_mask)
-      
+          
         # Step 3: Add the computed shift to the current shift values
         new_shift_x = self.config["current_deltax"] + shift_yx[1]
         new_shift_y = self.config["current_deltay"] + shift_yx[0]
@@ -1011,16 +1006,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if ax != self.ml1e_ax:
                 self.ml1e_fig.delaxes(ax)
         
+        # Only plot last N points to keep plotting fast
+        max_history = 50
+        if len(shift_steps) > max_history:
+            start_idx = -max_history
+            shift_steps = range(max_history)
+        else:
+            start_idx = None
+
         # Create new twin axis for perceptual loss
         pl_ax = self.ml1e_ax.twinx()
         
         # Plot ml1e over shifts (red, left axis)
-        ml1e_line = self.ml1e_ax.plot(shift_steps, self.ml1e_history, 'r-', label='ml1e')
+        ml1e_line = self.ml1e_ax.plot(shift_steps, self.ml1e_history[start_idx:], 'r-', label='ml1e')
         self.ml1e_ax.set_ylabel("ml1e", color='r')
         self.ml1e_ax.tick_params(axis='y', labelcolor='r')
 
         # Plot Perceptual Loss over shifts (blue, right axis)
-        pl_line = pl_ax.plot(shift_steps, self.pl_history, 'b-', label='Perceptual Loss')
+        pl_line = pl_ax.plot(shift_steps, self.pl_history[start_idx:], 'b-', label='Perceptual Loss')
         pl_ax.set_ylabel("Perceptual Loss", color='b')
         pl_ax.tick_params(axis='y', labelcolor='b')
 
@@ -1033,37 +1036,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_ax.legend(lines, labels, loc='upper right')
 
         # Create x-axis labels showing the shifts
-        x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history, self.shift_y_history)]
+        x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history[start_idx:], self.shift_y_history[start_idx:])]
         
-        # Set x-axis labels and rotate them for better readability
-        self.ml1e_ax.set_xticks(shift_steps)
-        self.ml1e_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        # Reduce number of x-tick labels
+        step = max(len(x_labels) // 5, 1)  # Show ~5 labels
+        self.ml1e_ax.set_xticks(shift_steps[::step])
+        self.ml1e_ax.set_xticklabels([x_labels[i] for i in range(0, len(x_labels), step)], rotation=45, ha='right')
         
         # Add x-axis label
         self.ml1e_ax.set_xlabel("Shifts (x, y)")
 
-        # Plot normalized metrics in the second graph
+        # Plot normalized metrics in the second graph with reduced points
         if self.ssim_history:
-            self.metrics_ax.plot(shift_steps, self.ssim_history, 'g-', label='SSIM')
+            self.metrics_ax.plot(shift_steps, self.ssim_history[start_idx:], 'g-', label='SSIM')
         if self.nmi_history:
-            self.metrics_ax.plot(shift_steps, self.nmi_history, 'y-', label='NMI')
+            self.metrics_ax.plot(shift_steps, self.nmi_history[start_idx:], 'y-', label='NMI')
         if self.ncc_history:
-            self.metrics_ax.plot(shift_steps, self.ncc_history, 'm-', label='NCC')
+            self.metrics_ax.plot(shift_steps, self.ncc_history[start_idx:], 'm-', label='NCC')
 
-        self.metrics_ax.set_xticks(shift_steps)
-        self.metrics_ax.set_xticklabels(x_labels, rotation=45, ha='right')
+        # Use same x-axis labeling scheme for metrics plot
+        self.metrics_ax.set_xticks(shift_steps[::step])
+        self.metrics_ax.set_xticklabels([x_labels[i] for i in range(0, len(x_labels), step)], rotation=45, ha='right')
         
         self.metrics_ax.set_xlabel("Shifts (x, y)")
         self.metrics_ax.set_ylabel("Metric Value")
         self.metrics_ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
 
-        # Adjust layout to prevent label cutoff
-        self.ml1e_fig.tight_layout()
-        self.metrics_fig.tight_layout()
+        # Use tight_layout only when needed (e.g., on window resize)
+        # self.ml1e_fig.tight_layout()
+        # self.metrics_fig.tight_layout()
 
-        # Redraw the updated plots
-        self.ml1e_canvas.draw()
-        self.metrics_canvas.draw()
+        # Use draw_idle() instead of draw() for better performance
+        self.ml1e_canvas.draw_idle()
+        self.metrics_canvas.draw_idle()
 
 
     def compute_sum_of_layers(self):
