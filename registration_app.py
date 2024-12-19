@@ -1220,7 +1220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             #print(f"selected_layer = {selected_layer}")
             if self.diff_features is not None:
                 #print(f"diff_features keys = {self.diff_features.keys()}")
-                activations = self.diff_features[selected_layer]
+                activations = self.diff_features[f"{selected_layer}_diff"]
                 self.heatmap_canvas.plot_heatmap(activations, mask=None, cmap='jet')
         
           
