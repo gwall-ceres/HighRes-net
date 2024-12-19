@@ -13,7 +13,7 @@ def apply_shift_to_template(shift_x, shift_y, template_image, template_mask):
          # Apply shift to the template image
         shifted_image = ndi_shift(
             template_image,
-            shift=(shift_x, shift_y),
+            shift=(shift_y, shift_x),
             mode='constant',
             cval=0,
             order=3  # Cubic interpolation for images
@@ -337,13 +337,13 @@ def compute_shift_pcc(ref_image, shifted_image, ref_mask, shifted_mask):
     #ref_masked = ref_image * ref_mask.astype(ref_image.dtype)
     #mov_masked = shifted_image * shifted_mask.astype(shifted_image.dtype)
     #do not mask the pixels at all
-    ref_masked = ref_image 
-    mov_masked = shifted_image
+    #ref_masked = ref_image 
+    #mov_masked = shifted_image
 
     # Compute the shift (delta_x, delta_y) between reference and template image
     shift_yx, error, diffphase = phase_cross_correlation(
             ref_image,
-            mov_masked,
+            shifted_image,
             upsample_factor=1000
         )
     return shift_yx

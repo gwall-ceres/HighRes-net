@@ -43,7 +43,8 @@ def compute_perceptual_loss(ref_image, mov_image,
     
     # Ensure consistent feature ordering
     if isinstance(ref_features, dict):
-        feature_names = sorted(ref_features.keys())
+        feature_names = list(ref_features.keys())#sorted(ref_features.keys())
+        #print(feature_names)
         ref_features = [ref_features[name] for name in feature_names]
         mov_features = [mov_features[name] for name in feature_names]
     
@@ -57,6 +58,8 @@ def compute_perceptual_loss(ref_image, mov_image,
     # Layer 19: Deep in third conv block
     # Layer 28: Deep features
     layer_weights = [1.0, 0.8, 0.6, 0.4, 0.2]  # Decreasing weights for deeper layers
+    #if the number of features is different than the number of layers, keep track of the weights that were applied
+    applied_weights = []
     
     # Process each layer with proper mask handling
     for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
@@ -87,21 +90,23 @@ def compute_perceptual_loss(ref_image, mov_image,
         if num_valid > 0:
             # Compute masked L1 loss directly on feature values
             layer_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid
-            
+            diff_features[f"{feature_names[idx]}_loss"] = layer_loss.item()
             # Store feature differences for visualization
             l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)
             l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid
             #store the feature differences so we can plot them later
-            diff_features[feature_names[idx]] = l1_diff_summed.detach().cpu().numpy()
+            diff_features[f"{feature_names[idx]}_diff"] = l1_diff_summed.detach().cpu().numpy()
             #store the mask so we can plot it later
             diff_features[f"{feature_names[idx]}_mask"] = mask_resized
             
+            
             # Apply layer weight
             weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
+            applied_weights.append(weight)
             total_loss += weight * layer_loss.item()
-    
+
     # Normalize by sum of weights
-    total_loss /= sum(layer_weights[:len(ref_features)])
+    total_loss /= sum(applied_weights)
     
     return total_loss, diff_features
 

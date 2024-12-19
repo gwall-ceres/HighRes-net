@@ -220,17 +220,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_canvas = FigureCanvas(self.ml1e_fig)
         self.ml1e_ax = self.ml1e_fig.add_subplot(111)
         self.ml1e_ax.set_title("ml1e over Shifts")
-        #self.ml1e_ax.set_xlabel("Shift Steps")
         self.ml1e_ax.set_ylabel("ml1e")
         graphs_layout.addWidget(self.ml1e_canvas)
 
-        #Add new figure/canvas for combined metrics
+        # Create a container for checkbox and metrics figure
+        metrics_container = QtWidgets.QVBoxLayout()
+        
+        # Add checkbox to the container
+        self.pl_layers_checkbox = QtWidgets.QCheckBox("Show PL Layer History", self)
+        self.pl_layers_checkbox.stateChanged.connect(self.update_plots)
+        metrics_container.addWidget(self.pl_layers_checkbox)
+        
+        # Add metrics figure to the container
         self.metrics_fig = Figure(figsize=(4, 3))
         self.metrics_canvas = FigureCanvas(self.metrics_fig)
         self.metrics_ax = self.metrics_fig.add_subplot(111)
         self.metrics_ax.set_title("Registration Metrics")
-        graphs_layout.addWidget(self.metrics_canvas)
-    # Add graphs layout to grid
+        metrics_container.addWidget(self.metrics_canvas)
+        
+        # Add the container to the graphs layout
+        graphs_layout.addLayout(metrics_container)
+
+        # Add graphs layout to grid
         grid_layout.addLayout(graphs_layout, 3, 0, 1, 2)  # Span across 2 columns
 
         # Set stretch factors for rows and columns
@@ -273,6 +284,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shift_x_history = []
         self.shift_y_history = []
 
+        # Initialize histories for individual PL layers
+        self.pl_layer_histories = {
+            "0_loss": [],
+            "5_loss": [],
+            "10_loss": [],
+            "19_loss": [],
+            "28_loss": []
+        }
+
         self.best_shift_x = 0.0
         self.best_shift_y = 0.0
         self.best_perceptual_loss = float('inf')
@@ -291,6 +311,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.config["template_mask"]:
             self.load_image_from_path("template_mask", self.config["template_mask"])
 
+        # Add checkbox for PL layer history
+        #self.pl_layers_checkbox = QtWidgets.QCheckBox("Show PL Layer History", self)
+        #self.pl_layers_checkbox.stateChanged.connect(self.update_plots)
+        #grid_layout.addWidget(self.pl_layers_checkbox, 2, 1)  # Adjust grid position as needed
+
+        
+
     def reset_history(self):
         # Reset all history lists
         self.ml1e_history = []
@@ -300,6 +327,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ncc_history = []
         self.shift_x_history = []
         self.shift_y_history = []
+        
+        # Reset PL layer histories
+        for key in self.pl_layer_histories:
+            self.pl_layer_histories[key] = []
 
         # Clear the plots
         self.ml1e_ax.clear()
@@ -696,6 +727,9 @@ class MainWindow(QtWidgets.QMainWindow):
         Handle updating the shift based on user input for Delta X.
         """
         text = self.deltaX_edit.text()
+        #print(f"text = {text}")
+        #for char in text:
+        #    print(f"char = {char}")
         try:
             new_shift_x = float(text)
             self.config["current_deltax"] = new_shift_x
@@ -807,6 +841,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ml1e_history.append(ml1e)
         pl, self.diff_features = self.compute_perceptual_loss(shifted_image, shifted_mask)
         # logging.debug(f"Computed ml1e: {ml1e}, Perceptual Loss: {pl}")
+        
 
        
         selected_choice = self.layer_dropdown.currentText()
@@ -830,6 +865,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ssim_history.append(ssim_val)
         self.nmi_history.append(nmi_val)
         self.ncc_history.append(ncc_val)
+
+        # Store individual layer losses
+        if self.diff_features is not None:
+            for layer_key in self.pl_layer_histories.keys():
+                if layer_key in self.diff_features:
+                    # Use the pre-computed layer loss from diff_features
+                    self.pl_layer_histories[layer_key].append(self.diff_features[layer_key])
     
         # Update plots
         self.update_plots()
@@ -838,6 +880,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update difference heatmap
         self.compute_and_display_heatmap(shifted_image, shifted_mask)
         # logging.debug("Computed and displayed difference heatmap.")
+
+        
 
     def apply_best_shift(self):
         """
@@ -993,14 +1037,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_plots(self):
         """
-        Update the plots with new ml1e and perceptual loss values, and show shifts as x-axis labels.
+        Update the plots with either metrics or PL layer histories based on checkbox state.
         """
-        shift_steps = range(len(self.ml1e_history))  # X-axis positions
-
-        # Clear the plots before updating
+        if not self.ml1e_history:  # Check if we have any data to plot
+            return
+            
+        shift_steps = range(len(self.ml1e_history))
+        
+        # Clear the plots
         self.ml1e_ax.clear()
         self.metrics_ax.clear()
-        # Clear the twin axis if it exists
         for ax in self.ml1e_fig.axes:
             if ax != self.ml1e_ax:
                 self.ml1e_fig.delaxes(ax)
@@ -1026,10 +1072,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pl_ax.set_ylabel("Perceptual Loss", color='b')
         pl_ax.tick_params(axis='y', labelcolor='b')
 
-        # Add combined title
-        self.ml1e_ax.set_title("ml1e and Perceptual Loss over Shifts")
-
-        # Add combined legend
+        # Add combined legend for ml1e plot
         lines = ml1e_line + pl_line
         labels = [line.get_label() for line in lines]
         self.ml1e_ax.legend(lines, labels, loc='upper right')
@@ -1038,34 +1081,44 @@ class MainWindow(QtWidgets.QMainWindow):
         x_labels = [f"{x:.3f},{y:.3f}" for x, y in zip(self.shift_x_history[start_idx:], self.shift_y_history[start_idx:])]
         
         # Reduce number of x-tick labels
-        step = max(len(x_labels) // 5, 1)  # Show ~5 labels
+        step = max(len(x_labels) // 5, 1)
         self.ml1e_ax.set_xticks(shift_steps[::step])
         self.ml1e_ax.set_xticklabels([x_labels[i] for i in range(0, len(x_labels), step)], rotation=45, ha='right')
         
         # Add x-axis label
         self.ml1e_ax.set_xlabel("Shifts (x, y)")
 
-        # Plot normalized metrics in the second graph with reduced points
-        if self.ssim_history:
-            self.metrics_ax.plot(shift_steps, self.ssim_history[start_idx:], 'g-', label='SSIM')
-        if self.nmi_history:
-            self.metrics_ax.plot(shift_steps, self.nmi_history[start_idx:], 'y-', label='NMI')
-        if self.ncc_history:
-            self.metrics_ax.plot(shift_steps, self.ncc_history[start_idx:], 'm-', label='NCC')
+        # For the second plot, show either metrics or PL layer histories based on checkbox
+        if self.pl_layers_checkbox.isChecked():
+            # Plot PL layer histories
+            colors = ['g-', 'y-', 'm-', 'c-', 'k-']
+            for (layer_key, history), color in zip(self.pl_layer_histories.items(), colors):
+                if history:  # Only plot if we have data
+                    label = f"Layer {layer_key.split('_')[0]}"
+                    #print(f"label = {label}, history len = {len(history)}")
+                    self.metrics_ax.plot(shift_steps, history[start_idx:], color, label=label)
+            
+            self.metrics_ax.set_ylabel("Layer Loss")
+            self.metrics_ax.set_title("PL Layer Histories")
+        else:
+            # Plot regular metrics
+            if self.ssim_history:
+                self.metrics_ax.plot(shift_steps, self.ssim_history[start_idx:], 'g-', label='SSIM')
+            if self.nmi_history:
+                self.metrics_ax.plot(shift_steps, self.nmi_history[start_idx:], 'y-', label='NMI')
+            if self.ncc_history:
+                self.metrics_ax.plot(shift_steps, self.ncc_history[start_idx:], 'm-', label='NCC')
+            
+            self.metrics_ax.set_ylabel("Metric Value")
+            self.metrics_ax.set_title("Registration Metrics")
 
         # Use same x-axis labeling scheme for metrics plot
         self.metrics_ax.set_xticks(shift_steps[::step])
         self.metrics_ax.set_xticklabels([x_labels[i] for i in range(0, len(x_labels), step)], rotation=45, ha='right')
-        
         self.metrics_ax.set_xlabel("Shifts (x, y)")
-        self.metrics_ax.set_ylabel("Metric Value")
         self.metrics_ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
 
-        # Use tight_layout only when needed (e.g., on window resize)
-        # self.ml1e_fig.tight_layout()
-        # self.metrics_fig.tight_layout()
-
-        # Use draw_idle() instead of draw() for better performance
+        # Draw the canvases
         self.ml1e_canvas.draw_idle()
         self.metrics_canvas.draw_idle()
 

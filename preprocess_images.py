@@ -21,30 +21,31 @@ def compute_sum_of_layers(diff_features, normalize=True):
     # Find the largest dimensions among all layers
     max_height = 0
     max_width = 0
-    for layer in diff_features:
-        activations = diff_features[layer]
-        height, width = activations.shape
-        max_height = max(max_height, height)
-        max_width = max(max_width, width)
+    activations = []
+    for key in diff_features.keys():
+        if key.endswith("_diff"):
+            activations.append(diff_features[key])
+            height, width = activations[-1].shape
+            max_height = max(max_height, height)
+            max_width = max(max_width, width)
     
     # Create array to store the sum of all layers
     summed_activations = np.zeros((max_height, max_width))
     
     # Add each normalized layer to the sum
-    for layer in diff_features:
-        activations = diff_features[layer]
+    for activation in activations:
         
         # Normalize the activations to [0,1] range
-        layer_max = np.max(np.abs(activations))
+        layer_max = np.max(np.abs(activation))
         if layer_max > 0 and normalize:  # Avoid division by zero
-            normalized_activations = activations / layer_max
+            normalized_activation = activation / layer_max
         else:
-            normalized_activations = activations
+            normalized_activation = activation
             
         # Scale to largest dimensions if necessary
-        if normalized_activations.shape != (max_height, max_width):
-            scaled_activations = transform.resize(
-                normalized_activations,
+        if normalized_activation.shape != (max_height, max_width):
+            scaled_activation = transform.resize(
+                normalized_activation,
                 (max_height, max_width),
                 order=3,  # Cubic interpolation
                 mode='reflect',
@@ -52,10 +53,10 @@ def compute_sum_of_layers(diff_features, normalize=True):
                 preserve_range=True
             )
         else:
-            scaled_activations = normalized_activations
+            scaled_activation = normalized_activation
             
         # Add to sum
-        summed_activations += scaled_activations
+        summed_activations += scaled_activation
     
     if normalize:
         # Optionally normalize the final sum to [0,1] range
