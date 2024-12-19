@@ -8,23 +8,11 @@ import numpy as np
  #[0.229, 0.224, 0.225]
 # Define the VGGFeatureExtractor with updated weights parameter
 class VGGFeatureExtractor(torch.nn.Module):
-    layers=['0', '5', '10', '19', '28']
+    #layers=['0', '5', '10', '19', '28']
+    layers=['1', '6', '11', '20', '29']
 
     def __init__(self):
         super(VGGFeatureExtractor, self).__init__()
-        from torchvision.models import VGG19_Weights
-        weights = VGG19_Weights.DEFAULT
-        self.preprocess = transforms.Compose([
-                          transforms.ToPILImage(),
-                          transforms.ToTensor(),
-                          transforms.Normalize(mean=weights.transforms().mean,
-                                            std=weights.transforms().std)])
-        self.vgg = vgg19(weights=weights).features[:int(VGGFeatureExtractor.layers[-1])+1]
-        #weights_path="./vgg19_conv_layers.pth"
-        #self.layers = layers
-        #self.vgg = vgg19().features[:29]  # Match truncated layers
-        # Load weights from the saved file
-        #self.vgg.load_state_dict(torch.load(weights_path, map_location="cpu"))
 
         if torch.cuda.is_available():
             self.hardware = 'cuda'
@@ -32,8 +20,27 @@ class VGGFeatureExtractor(torch.nn.Module):
         else:
             self.hardware = 'cpu'
 
+        #from torchvision.models import VGG19_Weights
+        #weights = VGG19_Weights.DEFAULT
+        weights_path="./vgg19_conv_layers.pth"
+        #self.layers = layers
+        self.vgg = vgg19().features[:30]  # Match truncated layers
+        #for idx, layer in enumerate(self.vgg):
+        #    print(idx, layer)
+        # Load weights from the saved file
+        self.vgg.load_state_dict(torch.load(weights_path, map_location=self.hardware))
+        self.preprocess = transforms.Compose([
+                          transforms.ToPILImage(),
+                          transforms.ToTensor(),
+                          transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])])
+        #self.vgg = vgg19(weights=weights).features[:int(VGGFeatureExtractor.layers[-1])+1]
+        
+
+        
+
     def forward(self, x):
-        x = self.convert_grayscale_to_input_tensor(x).to(self.hardware)
+        #x = self.convert_grayscale_to_input_tensor(x).to(self.hardware)
         outputs = {}
         for name, layer in self.vgg._modules.items():
             x = layer(x)

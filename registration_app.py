@@ -103,11 +103,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Dropdown Menu for Visualization -----
         self.layer_dropdown = QtWidgets.QComboBox(self)
         self.layer_dropdown.addItem("Heatmap")
-        self.layer_dropdown.addItem("Layer 0 (Conv1)")
-        self.layer_dropdown.addItem("Layer 5 (Conv2)")
-        self.layer_dropdown.addItem("Layer 10 (Conv3)")
-        self.layer_dropdown.addItem("Layer 19 (Conv4)")
-        self.layer_dropdown.addItem("Layer 28 (Conv5)")
+        for layer_id in VGGFeatureExtractor.layers:
+            self.layer_dropdown.addItem(f"Layer {layer_id}")
+   
         self.layer_dropdown.addItem("Sum of Layers")
 
         self.layer_dropdown.currentIndexChanged.connect(self.update_visualization_choice)
@@ -285,13 +283,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shift_y_history = []
 
         # Initialize histories for individual PL layers
-        self.pl_layer_histories = {
-            "0_loss": [],
-            "5_loss": [],
-            "10_loss": [],
-            "19_loss": [],
-            "28_loss": []
-        }
+        self.pl_layer_histories = {}
+
+        for layer_id in VGGFeatureExtractor.layers:
+            self.pl_layer_histories[f"{layer_id}_loss"] = []
 
         self.best_shift_x = 0.0
         self.best_shift_y = 0.0
@@ -1093,8 +1088,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # Plot PL layer histories
             colors = ['g-', 'y-', 'm-', 'c-', 'k-']
             for (layer_key, history), color in zip(self.pl_layer_histories.items(), colors):
+                #print(layer_key, history)
                 if history:  # Only plot if we have data
-                    label = f"Layer {layer_key.split('_')[0]}"
+                    label = f"VGG{layer_key.split('_')[0]}"
                     #print(f"label = {label}, history len = {len(history)}")
                     self.metrics_ax.plot(shift_steps, history[start_idx:], color, label=label)
             
@@ -1152,7 +1148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             #print(f"selected_layer = {selected_layer}")
             if self.diff_features is not None:
                 #print(f"diff_features keys = {self.diff_features.keys()}")
-                activations = self.diff_features[selected_layer]
+                activations = self.diff_features[f"{selected_layer}_diff"]
                 self.heatmap_canvas.plot_heatmap(activations, mask=None, cmap='jet')
                 #self.heatmap_canvas.plot_heatmap(activations)
         

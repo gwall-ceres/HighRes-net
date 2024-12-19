@@ -217,11 +217,13 @@ def compute_shift_pl(model, ref_image, template_image, ref_mask, template_mask,
         tuple: Best shift (delta_y, delta_x)
     """
     # Calculate scale factor based on points_per_dim
-    scale_factor = 1.0 / (points_per_dim - 1)
+    scale_factor = 1.0 / (points_per_dim - 2)
     if scale_factor < 0.25:
         scale_factor = 0.25
     if scale_factor >= 1.0:
         scale_factor = 0.9
+
+    
     
     # Start recursive search
     return recursive_pl_search(
@@ -460,7 +462,7 @@ def compute_shift_with_metric(metric_fn, minimize=True, ref_image=None, template
         tuple: Best shift (delta_y, delta_x)
     """
     # Calculate scale factor based on points_per_dim
-    scale_factor = 1.0 / (points_per_dim - 1)
+    scale_factor = 1.0 / (points_per_dim - 2)
     if scale_factor < 0.25:
         scale_factor = 0.25
     if scale_factor >= 1.0:

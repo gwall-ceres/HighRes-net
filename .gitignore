@@ -6,5 +6,5 @@ src.egg-info/
 .idea
 venv
 
-/tb_logs
 /build
+/tb_logs

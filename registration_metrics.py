@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from skimage import transform
+from skimage import transform, exposure
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import normalized_mutual_information as nmi
 
@@ -24,6 +24,21 @@ def _validate_and_convert_masks(ref_mask, mov_mask):
         mov_mask = mov_mask > 0.5
     return ref_mask, mov_mask
 
+def histogram_contrast_stretch(image):
+    """
+    Apply histogram contrast stretching to an image.
+
+    Args:
+        image (np.ndarray): Input image in [0, 1] range.
+
+    Returns:
+        np.ndarray: Contrast-stretched image in [0, 1] range.
+    """
+    # Apply contrast stretching
+    p2, p98 = np.percentile(image, (2, 98))
+    img_rescaled = exposure.rescale_intensity(image, in_range=(p2, p98), out_range=(0, 1))
+    return img_rescaled
+
 def compute_perceptual_loss(ref_image, mov_image,
                             ref_mask, mov_mask, model, **metric_kwargs):
     # Input validation
@@ -32,14 +47,22 @@ def compute_perceptual_loss(ref_image, mov_image,
     
     # combine the two masks in order to only consider valid pixels
     combined_mask = ref_mask.astype(float) * mov_mask.astype(float)
+    combined_mask = combined_mask > 0
+    #valid_ratio = np.sum(combined_mask).astype(float) / combined_mask.shape[0] * combined_mask.shape[1]
+
     # Apply masks to input images
-    ref_masked = ref_image * combined_mask
-    mov_masked = mov_image * combined_mask
-    
+    ref_masked = histogram_contrast_stretch(ref_image)
+    mov_masked = histogram_contrast_stretch(mov_image)
+
+    ref_masked[~combined_mask] = 0#ref_image * combined_mask
+    mov_masked[~combined_mask] = 0#mov_image * combined_mask
+
+    ref_tensor = model.convert_grayscale_to_input_tensor(ref_masked).to(model.hardware)
+    mov_tensor = model.convert_grayscale_to_input_tensor(mov_masked).to(model.hardware)
     # Extract features using the model (which handles grayscale conversion)
     with torch.no_grad():
-        ref_features = model(ref_masked)
-        mov_features = model(mov_masked)
+        ref_features = model(ref_tensor)
+        mov_features = model(mov_tensor)
     
     # Ensure consistent feature ordering
     if isinstance(ref_features, dict):
@@ -51,7 +74,7 @@ def compute_perceptual_loss(ref_image, mov_image,
     # Initialize loss tracking
     total_loss = 0.0
     diff_features = {}
-    # Weights for VGG19 layers ['0', '5', '10', '19', '28']
+    # Weights for VGG19 layers ['1', '6', '11', '20', '29']
     # Layer 0: First conv layer - highest detail
     # Layer 5: End of first conv block
     # Layer 10: End of second conv block
@@ -64,46 +87,23 @@ def compute_perceptual_loss(ref_image, mov_image,
     # Process each layer with proper mask handling
     for idx, (ref_feat, mov_feat) in enumerate(zip(ref_features, mov_features)):
         _, C, Hf, Wf = ref_feat.shape
+              
+        # Compute masked L1 loss directly on feature values
+        layer_loss = F.l1_loss(ref_feat, mov_feat, reduction='mean')
+        diff_features[f"{feature_names[idx]}_loss"] = layer_loss.item()
+        # Store feature differences for visualization
+        l1_diff = torch.abs(ref_feat - mov_feat)
+        l1_diff_summed = l1_diff.sum(dim=1).squeeze(0).detach().cpu().numpy()
+        #store the feature differences so we can plot them later
+        diff_features[f"{feature_names[idx]}_diff"] = l1_diff_summed
+        #store the mask so we can plot it later
+        diff_features[f"{feature_names[idx]}_mask"] = combined_mask
         
-        # Resize mask to match feature map size
-        mask_resized = transform.resize(
-            combined_mask,
-            (Hf, Wf),
-            order=0,  # Use nearest neighbor interpolation for mask
-            mode='constant',
-            cval=0,
-            anti_aliasing=False,
-            preserve_range=True
-        ).astype(np.float32)
-
         
-        # Convert mask to tensor and expand to match feature dimensions
-        mask_tensor = torch.from_numpy(mask_resized).unsqueeze(0).unsqueeze(0).to(model.hardware)
-        mask_expanded = mask_tensor.expand_as(ref_feat)
-        
-        # Apply mask to features
-        ref_feat_masked = ref_feat * mask_expanded
-        mov_feat_masked = mov_feat * mask_expanded
-        
-        # Calculate valid pixels for this layer
-        num_valid = torch.sum(mask_expanded)
-        if num_valid > 0:
-            # Compute masked L1 loss directly on feature values
-            layer_loss = F.l1_loss(ref_feat_masked, mov_feat_masked, reduction='sum') / num_valid
-            diff_features[f"{feature_names[idx]}_loss"] = layer_loss.item()
-            # Store feature differences for visualization
-            l1_diff = torch.abs(ref_feat_masked - mov_feat_masked)
-            l1_diff_summed = l1_diff.sum(dim=1).squeeze(0) / num_valid
-            #store the feature differences so we can plot them later
-            diff_features[f"{feature_names[idx]}_diff"] = l1_diff_summed.detach().cpu().numpy()
-            #store the mask so we can plot it later
-            diff_features[f"{feature_names[idx]}_mask"] = mask_resized
-            
-            
-            # Apply layer weight
-            weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
-            applied_weights.append(weight)
-            total_loss += weight * layer_loss.item()
+        # Apply layer weight
+        weight = layer_weights[idx] if idx < len(layer_weights) else layer_weights[-1]
+        applied_weights.append(weight)
+        total_loss += weight * layer_loss.item()
 
     # Normalize by sum of weights
     total_loss /= sum(applied_weights)
